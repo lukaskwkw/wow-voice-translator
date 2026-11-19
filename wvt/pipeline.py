@@ -381,3 +381,38 @@ class PushToTalkPipeline:
     def cancel_assistant(self) -> None:
         self._pending_assistant = None
         self.ui.status("info", "Anulowano", timeout=1.5)
+
+    # ------------------------------------------------------------------ typed question
+    def ask_assistant(self, text: str) -> HistoryItem | None:
+        """A question typed in the history overlay: no STT, no transcript confirm."""
+        text = " ".join((text or "").split()).strip()
+        if not text:
+            return None
+        if self._pending_confirm is not None or self._pending_assistant is not None:
+            self.ui.status("busy", "Dokończ edycję tekstu…", timeout=2.0)
+            return None
+        if not self._busy.acquire(blocking=False):
+            self.ui.status("busy", "Poczekaj – poprzednia wypowiedź jeszcze się tłumaczy", timeout=2.0)
+            return None
+        try:
+            if self.assistant is None:
+                self.ui.status("info", "Asystentka jest wyłączona", ["assistant.enabled w config.json"], timeout=4)
+                return None
+            self.ui.status("busy", f"{self._channel_label('assistant')} myśli…", [f"PL: {text}"])
+            t1 = time.perf_counter()
+            reply, line = self.assistant.handle(text)
+            timings = {"assistant_ms": round((time.perf_counter() - t1) * 1000)}
+            self.last_timings = timings
+            corr = getattr(self.assistant, "last_correction", None)
+            shown = corr.text if corr is not None and corr.fixes else text
+            item = HistoryItem("assistant", shown, reply, line, timings, "assistant")
+            if self.cfg.get("privacy.keep_history", True):
+                self.history.appendleft(item)
+            self.ui.result(item)
+            return item
+        except Exception:
+            log.exception("typed assistant question failed")
+            self.ui.status("error", "Błąd – nic nie zostało wysłane", timeout=8)
+            return None
+        finally:
+            self._busy.release()

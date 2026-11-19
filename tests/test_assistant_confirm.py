@@ -147,3 +147,57 @@ def test_on_press_is_refused_while_the_transcript_is_pending():
 
     assert p.ui.statuses[-1] == ("busy", "Dokończ tekst dla Iskry…")
     assert p._pending_assistant is not None
+
+
+def test_ask_assistant_typed_question_runs_her():
+    p = make_pipeline(pending=None)
+
+    item = p.ask_assistant("  jak    leci quest?  ")
+
+    assert p.assistant.calls == ["jak leci quest?"]
+    assert item is not None
+    assert item.channel == "assistant" and item.status == "assistant"
+    assert item.polish == "jak leci quest?"
+    assert item.english == "reply"
+    assert "assistant_ms" in item.timings
+    assert list(p.history) == [item]
+    assert p.ui.results == [item]
+    assert p.last_timings is item.timings
+    assert not p._busy.locked()
+
+
+def test_ask_assistant_empty_text_does_nothing():
+    p = make_pipeline(pending=None)
+
+    assert p.ask_assistant("   ") is None
+    assert p.assistant.calls == []
+    assert p.history == deque(maxlen=10)
+
+
+def test_ask_assistant_busy_lock_refuses():
+    p = make_pipeline(pending=None)
+    p._busy.acquire()
+    try:
+        assert p.ask_assistant("pytanie") is None
+    finally:
+        p._busy.release()
+
+    assert p.assistant.calls == []
+    assert p.ui.statuses[-1][0] == "busy"
+
+
+def test_ask_assistant_without_assistant_status():
+    p = make_pipeline(pending=None)
+    p.assistant = None
+
+    assert p.ask_assistant("pytanie") is None
+    assert p.ui.statuses[-1] == ("info", "Asystentka jest wyłączona")
+    assert not p._busy.locked()
+
+
+def test_ask_assistant_refused_while_transcript_pending():
+    p = make_pipeline(pending=("stary", {}))
+
+    assert p.ask_assistant("pytanie") is None
+    assert p.assistant.calls == []
+    assert p.ui.statuses[-1] == ("busy", "Dokończ edycję tekstu…")

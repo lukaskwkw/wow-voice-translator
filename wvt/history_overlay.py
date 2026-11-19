@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QPushButton, QTextBrowser, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout
 
 from .history_text import render_history_html
 
@@ -28,11 +28,12 @@ class HistoryOverlay(QDialog):
 
     closed = Signal()
 
-    def __init__(self, items_getter, clear_callback, cfg, parent=None):
+    def __init__(self, items_getter, clear_callback, cfg, on_ask=None, parent=None):
         super().__init__(parent)
         self._items_getter = items_getter
         self._clear_callback = clear_callback
         self.cfg = cfg
+        self._on_ask = on_ask
         self.setWindowTitle("Iskra – historia rozmów")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -44,6 +45,16 @@ class HistoryOverlay(QDialog):
         self.view.setReadOnly(True)
         self.view.setOpenExternalLinks(False)
         lay.addWidget(self.view, 1)
+
+        ask_row = QHBoxLayout()
+        self.ask = QLineEdit()
+        self.ask.setPlaceholderText("Napisz do Iskry…")
+        self.ask.returnPressed.connect(self._send)
+        b_send = QPushButton("Wyślij")
+        b_send.clicked.connect(self._send)
+        ask_row.addWidget(self.ask, 1)
+        ask_row.addWidget(b_send)
+        lay.addLayout(ask_row)
 
         row = QHBoxLayout()
         b_clear = QPushButton("Wyczyść")
@@ -78,6 +89,18 @@ class HistoryOverlay(QDialog):
             self._clear_callback()
         finally:
             self.refresh()
+
+    def _send(self) -> None:
+        text = self.ask.text().strip()
+        if not text:
+            return
+        self.ask.clear()
+        if self._on_ask is None:
+            return
+        try:
+            self._on_ask(text)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ window
     def showEvent(self, event):  # noqa: N802 - Qt override

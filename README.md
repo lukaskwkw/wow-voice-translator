@@ -254,6 +254,7 @@ Hold **mouse button 5** and say what you want in Polish.
 - Both views read the same transcript kept in memory (newest first, up to 50 entries); nothing is written to disk.
 - The overlay opens on the right of the screen a moment after start-up when `assistant.history_overlay` is on. Turn it on or off from the tray ("Historia rozmów Iskry") or with the Settings checkbox "Pokaż overlay z historią rozmów nad grą"; `assistant.history_limit` (5-30) sets how many entries both views show.
 - The overlay is a normal window: you can scroll it and close it, and it does not take focus from the game when it appears. It also stays visible while the app window is hidden in the tray.
+- You can type a question straight into the overlay's input and press Enter or "Wyślij" (no push-to-talk). It uses the same game context the app already has from the addon (state, quests, chat), so nothing extra is sent to the addon. The answer shows up in the transcript and the HUD; if she prepares a command, it waits in the WoW chat box and you still press Enter to send it.
 - This needs no addon changes and no addon reinstall.
 
 ### Logs: where did the answer come from?

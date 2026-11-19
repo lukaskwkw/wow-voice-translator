@@ -1240,7 +1240,8 @@ class TranslatorApp:
         if self.history_overlay is None:
             self.history_overlay = HistoryOverlay(
                 lambda: self.assistant.transcript_items() if self.assistant else [],
-                self._clear_assistant_history, self.cfg)
+                self._clear_assistant_history, self.cfg,
+                on_ask=self._ask_from_history)
             self.history_overlay.closed.connect(self._on_history_closed)
         return self.history_overlay
 
@@ -1277,6 +1278,28 @@ class TranslatorApp:
     def _clear_assistant_history(self) -> None:
         if self.assistant:
             self.assistant.clear_transcript()
+
+    def _ask_from_history(self, text: str) -> None:
+        text = " ".join((text or "").split()).strip()
+        if not text:
+            return
+        if self.pipeline is None:
+            self._on_status("busy", "Modele jeszcze się ładują…", [self.model_state], 2.5)
+            return
+        win = self.tracker.find(max_age=0)
+
+        def run():
+            threading.Thread(target=self.pipeline.ask_assistant, args=(text,), daemon=True).start()
+
+        if win is None:
+            run()
+            return
+        try:
+            from . import winapi
+            winapi.user32.SetForegroundWindow(win.hwnd)
+        except Exception:
+            pass
+        QTimer.singleShot(250, run)
 
     def quit(self) -> None:
         try:
