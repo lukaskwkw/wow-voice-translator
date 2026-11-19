@@ -109,6 +109,7 @@ class FakeVoice:
     def __init__(self):
         self.said = []
         self.silenced = 0
+        self.default_voice_id = ""
 
     def say(self, text, voice_id, lang="pl", gain=1.0, speaker="assistant"):
         self.said.append((text, voice_id, lang))
@@ -622,6 +623,35 @@ def test_the_journal_keeps_questions_answers_and_comments(tmp_path):
     b.handle("ile mam złota?")
 
 
+def test_the_transcript_for_the_ui_keeps_question_and_answer():
+    a, *_ = make_assistant()
+    a.handle("pomocy")
+    items = a.transcript_items()
+    assert len(items) == 1
+    assert items[0]["intent"].startswith("help")
+    assert items[0]["reply"] and "pomocy" in items[0]["heard"]
+    assert items is not a.transcript  # a copy, not the deque itself
+    a.clear_transcript()
+    assert a.transcript_items() == []
+
+
+def test_history_html_is_rendered_oldest_first_and_escaped():
+    from wvt.history_text import render_history_html
+
+    assert "Brak rozmów" in render_history_html([])
+    items = [
+        {"at": 1700000002, "heard": "drugie", "reply": "B", "intent": "chat", "ms": 5},
+        {"at": 1700000001, "heard": "<pierwsze>", "reply": "<b>odp</b>", "intent": "help",
+         "fixed": "poprawione", "ms": 7},
+    ]
+    out = render_history_html(items, limit=10)
+    assert out.index("pierwsze") < out.index("drugie")  # oldest first
+    assert "&lt;pierwsze&gt;" in out and "<b>odp</b>" not in out
+    assert "usłyszane: poprawione" in out
+    limited = render_history_html(items, limit=1)
+    assert limited.count("Ty:") == 1 and "drugie" in limited and "pierwsze" not in limited
+
+
 # --------------------------------------------------------------------------- the names of the moment, what you carry
 
 def bag_pkt(sync, part, parts, *lines):
@@ -778,3 +808,16 @@ def test_what_now_is_a_plan_and_what_next_goes_on():
     assert a.handle("a gdzie to jest?")[1] == "/wvt track 183"  # the step is the topic now
     assert parse_intent("co dalej?").kind == "plan_next" and parse_intent("ok, a potem?").kind == "plan_next"
     assert parse_intent("co dalej w tym łańcuchu?").kind == "quest_worth"
+
+
+def test_speak_uses_the_manager_default_voice_when_config_voice_id_is_empty():
+    a, ins, ui, voice, _ = make_assistant(voice_id="")
+    voice.default_voice_id = "local:pl"  # the local-TTS manager
+    a._speak("Cześć, tu Iskra.")
+    assert voice.said[-1] == ("Cześć, tu Iskra.", "local:pl", "pl")
+
+
+def test_speak_stays_silent_without_any_voice_id():
+    a, ins, ui, voice, _ = make_assistant(voice_id="")
+    a._speak("Cześć.")
+    assert voice.said == [] and a._warned_no_voice is True

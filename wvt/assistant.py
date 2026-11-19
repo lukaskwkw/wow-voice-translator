@@ -715,6 +715,8 @@ class Assistant:
         self._invited: dict[str, float] = {}
         # the conversation: every question and answer (for her LLM), and what you are talking about (follow-ups)
         self._history: deque[dict] = deque(maxlen=12)
+        # the same conversation for the UI (tab and overlay); memory only, newest first
+        self.transcript: deque[dict] = deque(maxlen=50)
         self._topic: Optional[Topic] = None
         self._plan_shown = ""  # the step of the plan she named last ("co dalej?" goes on from it)
         self._warned_no_voice = False
@@ -1051,8 +1053,25 @@ class Assistant:
                        "reply": reply, "line": line, "sources": self._sources,
                        "ms": round((time.perf_counter() - t0) * 1000),
                        "zone": st.zone if st else "", "level": st.level if st else 0})
+        self.transcript.appendleft({
+            "at": time.time(),
+            "heard": polish,
+            "fixed": text if text != polish else "",
+            "reply": reply,
+            "line": line,
+            "intent": intent.kind + (f":{intent.channel}" if intent.channel else ""),
+            "sources": list(self._sources),
+            "ms": round((time.perf_counter() - t0) * 1000),
+        })
         self._respond(reply, line, status, event="")
         return reply, line
+
+    def transcript_items(self) -> list[dict]:
+        """A copy of the conversation for the UI (the tab and the overlay); memory only."""
+        return [dict(x) for x in self.transcript]
+
+    def clear_transcript(self) -> None:
+        self.transcript.clear()
 
     # ------------------------------------------------------------------ the conversation and its topic
     def _remember(self, polish: str, reply: str) -> None:
@@ -2165,6 +2184,8 @@ class Assistant:
     def _speak(self, text: str) -> None:
         voice = self.voice_getter()
         voice_id = str(self.cfg.get("assistant.voice_id", "") or "")
+        if not voice_id and voice is not None:
+            voice_id = str(getattr(voice, "default_voice_id", "") or "")
         if voice is None or not voice_id:
             if not self._warned_no_voice:
                 self._warned_no_voice = True

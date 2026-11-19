@@ -56,6 +56,7 @@ local defaults = {
 	panelShown = true,
 	voiceDebug = false,
 	assistant = true, -- pass chat lines and the player's state to the voice assistant (never spoken, free)
+	hdrLevels = false, -- HDR-safe grid: darker cell levels that survive HDR tone mapping (/wvt hdr on)
 }
 
 local KIND = {
@@ -188,16 +189,12 @@ end
 
 ---------------------------------------------------------------------------- signal grids
 
-local function ComputeCellSize(frame)
+local function ComputeCellSize(_frame)
 	local _, physH = GetPhysicalScreenSize()
 	if not physH or physH <= 0 then
 		physH = 768
 	end
-	local scale = frame:GetEffectiveScale()
-	if not scale or scale <= 0 then
-		scale = 1
-	end
-	return P.CELL_PX * 768 / physH / scale
+	return P.CELL_PX * 768 / physH
 end
 
 -- a grid of P.COLS x P.MAX_ROWS cells, `xCells` cells right of the top-left corner
@@ -1855,6 +1852,11 @@ events:SetScript("OnEvent", function(_, event, ...)
 			end
 		end
 		db = WoWVoiceTranslatorDB
+		if db.hdrLevels then
+			P.LEVELS = P.LEVELS_HDR
+		else
+			P.LEVELS = P.LEVELS_NORMAL
+		end
 	elseif event == "PLAYER_LOGIN" then
 		UpdateGeometry()
 		CreatePanel()
@@ -1895,6 +1897,19 @@ SlashCmdList["WOWVOICETRANSLATOR"] = function(msg)
 			Print("opoznienie najechania: " .. v .. " s")
 		else
 			Print("uzycie: /wvt dwell 0.12")
+		end
+	elseif cmd == "hdr" then
+		local v = strlower(rest or "")
+		if v == "on" or v == "1" then
+			db.hdrLevels = true
+			P.LEVELS = P.LEVELS_HDR
+			Print("HDR: jasne poziomy siatki obnizone (0/15/30/45%). Zjedz myszka na linie czatu.")
+		elseif v == "off" or v == "0" then
+			db.hdrLevels = false
+			P.LEVELS = P.LEVELS_NORMAL
+			Print("HDR: normalne poziomy siatki.")
+		else
+			Print("uzycie: /wvt hdr on|off")
 		end
 	elseif cmd == "say" then
 		SetVoiceOption("voiceSay", ParseOnOff(rest, db.voiceSay))
@@ -1954,7 +1969,7 @@ SlashCmdList["WOWVOICETRANSLATOR"] = function(msg)
 				ComputeCellSize(hoverGrid.frame)
 			)
 		)
-		Print("/wvt on | off | test | dwell <s> | say [on|off] | party [on|off] | lang en|pl | panel | voice | voicedebug")
+		Print("/wvt on | off | test | dwell <s> | hdr on|off | say [on|off] | party [on|off] | lang en|pl | panel | voice | voicedebug")
 		Print("/wvt inv Imie1 Imie2 | kick Imie | lead Imie | raid | leave | ready | asystent [on|off] | questy")
 		Print("/wvt way <mapa> <x> <y> [opis] | way clear | track <numer questa>")
 	end

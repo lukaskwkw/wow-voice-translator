@@ -57,13 +57,21 @@ class OpenAICompatLLM:
 
     def __init__(self, api_key: str, model: str, base_url: str, timeout_s: float = 20.0,
                  max_output_tokens: int = 4096, client: Optional[httpx.Client] = None,
-                 extra_headers: Optional[dict] = None):
+                 extra_headers: Optional[dict] = None, min_output_tokens: int = 2048,
+                 reasoning_effort: str = ""):
         self._key = (api_key or "").strip()
         self.model = model
         self.base_url = base_url
         self.url = _endpoint(base_url)
         self.timeout_s = float(timeout_s)
+        # a floor for max_tokens: reasoning models count thinking tokens against it, so a small caller cap (120-400)
+        # can end at finish_reason "length" with no text at all; the answer's length still comes from the prompt
+        self.min_output_tokens = int(min_output_tokens)
+        # a ceiling for the request (0 = no ceiling); a caller asking for more is capped here
         self.max_output_tokens = int(max_output_tokens)
+        # top-level reasoning_effort ("low" / "high" / "max" / "none" / "" = send nothing): the serving SDK (OpenCode
+        # Zen, OpenRouter) turns it into its own reasoning setting; a "#low" model suffix is client-only, never sent
+        self.reasoning_effort = str(reasoning_effort or "")
         self._client = client or httpx.Client(timeout=self.timeout_s)
         self._extra_headers = dict(extra_headers or {})
         self._resting_until = 0.0
@@ -88,9 +96,24 @@ class OpenAICompatLLM:
     def chat(self, messages: list[dict], max_tokens: int = 200, temperature: float = 0.0,
              stop: list[str] | None = None, timeout: float | None = None,
              thinking: Optional[str] = None) -> tuple[str, dict]:
-        """``thinking`` is ignored: an OpenAI-compatible endpoint has no thinking level."""
+        """``thinking`` is ignored: an OpenAI-compatible endpoint has no thinking level.
+
+        ``max_tokens`` is raised to :attr:`min_output_tokens` when a caller asks for less (the assistant asks for
+        120-400 token answers, but a reasoning model may spend all of them thinking and return no text at all), and
+        capped at :attr:`max_output_tokens` when that is positive.
+
+        :attr:`reasoning_effort` goes into the body as the top-level ``reasoning_effort`` field (no ``reasoning``
+        object, no ``#low`` model suffix): reasoning tokens count inside ``completion_tokens`` and against
+        ``max_tokens``, so ``low`` is the intended setting - it keeps the thinking short, the answer fast and avoids
+        a ``finish_reason: "length"`` with no text."""
+        requested = max(int(max_tokens or 0), self.min_output_tokens)
+        if self.max_output_tokens > 0:
+            requested = min(requested, self.max_output_tokens)
         body: dict = {"model": self.model, "messages": messages, "stream": False,
-                      "max_tokens": int(max_tokens or self.max_output_tokens)}
+                      "max_tokens": requested}
+        effort = self.reasoning_effort.strip()
+        if effort:
+            body["reasoning_effort"] = effort
         if temperature is not None:
             body["temperature"] = temperature
         if stop:
@@ -124,13 +147,26 @@ class OpenAICompatLLM:
             else:
                 text = str(content or "").strip()
             finish = choice.get("finish_reason", "")
+            usage = data.get("usage") or {}
+            if not isinstance(usage, dict):
+                usage = {}
+            details = usage.get("completion_tokens_details") or {}
+            if not isinstance(details, dict):
+                details = {}
         except (ValueError, TypeError, AttributeError):
             self.failures += 1
             raise OpenAICompatError(0, "unreadable answer") from None
         if not text:
             self.failures += 1
-            raise OpenAICompatError(200, f"empty answer ({finish or 'no choice'})")
-        return text, {"ms": self.last_ms, "finish": finish, "usage": data.get("usage", {}),
+            # no answer text: say why (a reasoning model may burn the whole cap on thinking tokens)
+            why = [f"finish={finish or 'none'}", f"max_tokens={requested}"]
+            if usage.get("completion_tokens") is not None:
+                why.append(f"completion_tokens={usage.get('completion_tokens')}")
+            if details.get("reasoning_tokens") is not None:
+                why.append(f"reasoning_tokens={details.get('reasoning_tokens')}")
+            raise OpenAICompatError(200, f"empty answer ({', '.join(why)})")
+        log.debug("cloud answer: finish=%s usage=%s", finish, usage)
+        return text, {"ms": self.last_ms, "finish": finish, "usage": usage,
                       "model": data.get("model", self.model)}
 
     def close(self) -> None:

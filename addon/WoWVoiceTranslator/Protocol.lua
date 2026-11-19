@@ -101,7 +101,10 @@ P.DIST_RANGE = 2
 P.DIST_NAMEPLATE = 3
 P.DIST_SELF = 4
 
-P.LEVELS = { 0, 1 / 3, 2 / 3, 1 }
+P.LEVELS_NORMAL = { 0, 1 / 3, 2 / 3, 1 }
+-- HDR tone mapping compresses the bright levels; these survive it better
+P.LEVELS_HDR = { 0, 0.15, 0.3, 0.45 }
+P.LEVELS = P.LEVELS_NORMAL
 
 local function clampU16(v)
 	v = floor(v)

@@ -104,6 +104,7 @@ Addon commands in the game:
 | Command | What it does |
 |---|---|
 | `/wvt test` | test the connection to the app |
+| `/wvt hdr on/off` | HDR-safe grid: darker cell levels for HDR displays (try this first if the grid is visible but `/wvt test` fails) |
 | `/wvt on`, `/wvt off` | hover translations on/off |
 | `/wvt say on/off`, `/wvt party on/off` | read /say or /party aloud (character voices, off by default) |
 | `/wvt lang en`, `/wvt lang pl` | hear other players in English, or translated to Polish |
@@ -126,6 +127,16 @@ Addon commands in the game:
 
 The full guide is in **[docs/VOICES.md](docs/VOICES.md)**: permissions for the key, credits, re-rolling voices you don't like, rating voices, the assistant's voice and how `/say` volume follows distance.
 
+### No ElevenLabs? Local voice for Iskra
+
+Without `ELEVENLABS_API_KEY` the assistant can still speak, using a local engine. Character voices (`/say`, `/party`) stay text-only in this mode.
+
+- `voice.backend` (default `auto`): use ElevenLabs when the key is set, otherwise the local voice. `local` always uses the local engine, `elevenlabs` never falls back.
+- Settings -> **Głos Iskry (gdy brak ElevenLabs)**: the checkbox turns the local voice on/off, the list picks **Automatycznie (Piper -> SAPI)**, **Piper** or **SAPI (Microsoft Paulina)**. Changes need an app restart only.
+- **Piper** (optional, GPL): `pip install -r requirements-tts.txt`, then `python -m wvt.cli tts --download`. Check it with `python -m wvt.cli tts --test "Dzień dobry"`.
+- **SAPI**: without Piper, the built-in Windows voice (Microsoft Paulina, `pl-PL`) is used. Nothing to install.
+- No addon reinstall is needed; the Lua addon still only draws text.
+
 ### Who speaks and writes in which language
 
 | What | Language | How to change |
@@ -139,7 +150,7 @@ The full guide is in **[docs/VOICES.md](docs/VOICES.md)**: permissions for the k
 ## The assistant (Iskra, Polish only)
 
 Hold **mouse button 5** and say what you want in Polish.
-- She answers aloud with an ElevenLabs voice (`assistant.voice_id`). Without a voice she answers in text on screen.
+- She answers aloud with an ElevenLabs voice (`assistant.voice_id`) or, without a key, with the local voice (Piper/SAPI - see above). With both off she answers in text on screen.
 - When something has to happen in the game, she types a ready command into the chat box, for example `/wvt inv Ann Bob`. **It runs only when you press Enter**; Esc cancels.
 
 | Say, for example | What happens |
@@ -170,8 +181,10 @@ Hold **mouse button 5** and say what you want in Polish.
 
 - Put `OPENCODE_API_KEY=...` (the name comes from `api_key_env`) in `.env`. Only the assistant sends her questions there.
 - OpenCode Zen's free chat models work only through the OpenCode client; from this app use the paid model (e.g. `deepseek-v4.1-flash`, cents per day), or point `base_url` at OpenRouter with your own model name and key.
-- If the cloud fails or has no key, the local model answers. The `assistant.openai` section also takes `timeout_s` (20) and `max_output_tokens` (4096); these are only the HTTP client's defaults - the assistant still bounds each answer with `assistant.llm_timeout_s` (8 s), and `max_output_tokens` applies only when she does not ask for a shorter answer.
-- These fields (provider, base URL, model, key env, router, Jev model/confidence) are also in Settings → Asystentka; provider/router changes take effect after restarting the app, and a key typed there is written to `.env`.
+- If the cloud fails or has no key, the local model answers. The `assistant.openai` section also takes `timeout_s` (20), `max_output_tokens` (4096) and `min_output_tokens` (2048); `timeout_s` is only the HTTP client's default - the assistant still bounds each answer with `assistant.llm_timeout_s` (8 s). `min_output_tokens` is a floor and `max_output_tokens` a ceiling for the request's `max_tokens` (0 = no ceiling): reasoning models count their thinking tokens against that cap, so a short answer request (120-400 tokens) can come back as HTTP 200 with no text at all (`finish_reason: "length"`). The floor does not force a long answer - the length still comes from the prompt. Raise the floor to 4096 if `finish=length` still shows up in the log.
+- `assistant.openai.reasoning_effort` (default `low`) is sent as the top-level `reasoning_effort` field (`low` / `high` / `max` / `none`; empty sends nothing), which both OpenCode Zen and OpenRouter accept (OpenRouter treats it as shorthand for `reasoning.effort`). `low` keeps the thinking short, so answers are faster and cheaper and `finish=length` is less likely - reasoning tokens still count toward `max_tokens`. Do not write `#low` in the model name: that suffix is client-only and is never sent to the API. In Settings it is the "Reasoning effort:" dropdown in the cloud group (takes effect after a restart).
+- The log line `wvt.cloud: cloud model ... failed (...) - the local model answers this one` means the cloud was asked and failed (including an empty answer with the reason, `max_tokens` and token counts), so this answer came from the local model.
+- These fields (provider, base URL, model, key env, reasoning effort, router, Jev model/confidence) are also in Settings → Asystentka; provider/router changes take effect after restarting the app, and a key typed there is written to `.env`.
 
 **Jev router (optional).** When the fast local rules do not recognise what you said, she can ask a Jev decision model which command it is, instead of treating it as ordinary chat. OpenRouter's Jev 1.14 is asked first and OpenCode Zen's Jev 1.13 answers when the first one fails or has no key.
 
@@ -223,6 +236,12 @@ Hold **mouse button 5** and say what you want in Polish.
 
 **Her log.** With `"privacy": {"log_assistant": true}` in `config.json`, every question, how she understood it and her answer go to `logs\assistant.jsonl`. This is off by default.
 
+**Conversation history (in memory).** The app shows what you and Iskra said, both in an `Iskra` tab and in an always-on-top overlay that can sit over WoW.
+- Both views read the same transcript kept in memory (newest first, up to 50 entries); nothing is written to disk.
+- The overlay opens on the right of the screen a moment after start-up when `assistant.history_overlay` is on. Turn it on or off from the tray ("Historia rozmów Iskry") or with the Settings checkbox "Pokaż overlay z historią rozmów nad grą"; `assistant.history_limit` (5-30) sets how many entries both views show.
+- The overlay is a normal window: you can scroll it and close it, and it does not take focus from the game when it appears. It also stays visible while the app window is hidden in the tray.
+- This needs no addon changes and no addon reinstall.
+
 ## Configuration
 
 `config.json` is created on the first start. Most settings are also in the app window.
@@ -250,6 +269,8 @@ The setup script only installs what is new and copies the current addon into the
   - Use *Windowed (Fullscreen)*, and keep WoW the active window.
   - Make sure the app has finished loading: `logs\wvt.log` says when the models are ready.
   - Keep the top-left corner of the game free of overlays: FPS counters, Discord or Steam overlays.
+  - **HDR on?** Tone mapping clips the bright cell levels, so the grid is visible but the app cannot calibrate it. Run `/wvt hdr on`: the cells get darker (0/15/30/45%) and the app calibrates itself from what it captures.
+  - If that still fails, use SDR for the game, or turn off Auto HDR for it: HDR GDI capture clips colors and the grid may not be readable at all.
 - **Setup didn't find WoW.** Run it with `-Wow "D:\Games\World of Warcraft"`, the folder that contains `_forever_`.
 - **Speech isn't recognised.** In the app window, go to *Settings → Microphone*, pick the right microphone and run the test.
 - **The microphone is quiet.**

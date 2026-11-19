@@ -8,6 +8,9 @@
     python -m wvt.cli install-addon [--wow "D:/Games/World of Warcraft"]
     python -m wvt.cli router "weź go doproś do party" [--json]
     python -m wvt.cli cloud "Odpowiedz: działa"
+    python -m wvt.cli tts --download
+    python -m wvt.cli tts --test "Cześć, tu Iskra." [--engine sapi]
+    python -m wvt.cli signal [--delay 3] [--out logs/signal_debug.png] [--width 320] [--height 120]
 """
 
 from __future__ import annotations
@@ -362,6 +365,81 @@ def cmd_router(cfg: Config, args) -> int:
     return 0
 
 
+PIPER_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/gosia/medium/pl_PL-gosia-medium"
+
+
+def _download(url: str, dest: Path) -> bool:
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp, tmp.open("wb") as fh:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                block = resp.read(1 << 16)
+                if not block:
+                    break
+                fh.write(block)
+                done += len(block)
+        tmp.replace(dest)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        print(f"BŁĄD pobierania {dest.name}: {type(exc).__name__}: {exc}")
+        return False
+    size = dest.stat().st_size
+    print(f"Pobrano {dest.name}: {size / 1e6:.1f} MB" + (f" z {total / 1e6:.1f} MB" if total else ""))
+    return True
+
+
+def cmd_tts(cfg: Config, args) -> int:
+    """Local voice for Iskra: download the Polish Piper voice or synthesize a test WAV."""
+    from .voice.local import SAMPLE_RATE, LocalTTS
+
+    local_cfg = dict(cfg.get("voice.local") or {})
+    if getattr(args, "engine", None):
+        local_cfg["engine"] = args.engine
+    model = resolve_path(local_cfg.get("piper_model", "models/piper/pl_PL-gosia-medium.onnx"))
+    if args.download:
+        ok = _download(PIPER_URL + ".onnx", model)
+        ok = _download(PIPER_URL + ".onnx.json", model.with_suffix(model.suffix + ".json")) and ok
+        if not ok:
+            print("Piper: model niepobrany – SAPI Paulina nadal działa (python -m wvt.cli tts --test ...).")
+    tts = LocalTTS(local_cfg)
+    if not tts.available():
+        print("Brak lokalnego TTS: zainstaluj Piper (pip install -r requirements-tts.txt) i pobierz model "
+              "(python -m wvt.cli tts --download) albo uruchom na Windows z głosem Paulina.")
+        return 1
+    if not args.download and not tts._piper_ready:
+        print("Piper: niedostępny (brak modułu piper lub modelu) – używam SAPI, jeśli jest.")
+    if not args.test:
+        print(f"Silnik: {tts.describe()} (model_id {tts.model_id}), model: {model}")
+        return 0
+    text = args.test.strip()
+    if not text:
+        print("Podaj tekst do wypowiedzenia: --test \"...\"")
+        return 1
+    import wave as _wave
+
+    stats: list = []
+    chunks = list(tts.stream_tts("local:pl", text, "pl", on_stats=stats.append))
+    pcm = b"".join(chunks)
+    out = resolve_path("data/tts_test.wav")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with _wave.open(str(out), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(pcm)
+    seconds = len(pcm) / 2 / SAMPLE_RATE
+    st = stats[0] if stats else None
+    print(f"Zapisano: {out} ({seconds:.2f} s, {len(text)} znaków, silnik {tts.describe()})")
+    if st:
+        print(f"Pierwszy dźwięk {st.ttfa_ms:.0f} ms, synteza {st.total_ms:.0f} ms, koszt {st.cost:.2f}")
+    return 0
+
+
 def cmd_cloud(cfg: Config, args) -> int:
     """One question to the OpenAI-compatible cloud model (assistant.openai) - no local models are loaded."""
     from .envfile import secret
@@ -377,7 +455,8 @@ def cmd_cloud(cfg: Config, args) -> int:
         return 1
     client = OpenAICompatLLM(key, o.get("model", "deepseek-v4.1-flash"),
                              o.get("base_url", "https://opencode.ai/inference/openai/v1"),
-                             float(o.get("timeout_s", 20)), int(o.get("max_output_tokens", 4096)))
+                             float(o.get("timeout_s", 20)), int(o.get("max_output_tokens", 4096)),
+                             reasoning_effort=str(o.get("reasoning_effort", "low") or ""))
     try:
         prompt = "Odpowiedz jednym krótkim zdaniem po polsku: " + text
         answer, meta = client.chat([{"role": "user", "content": prompt}], max_tokens=200)
@@ -388,6 +467,100 @@ def cmd_cloud(cfg: Config, args) -> int:
         return 1
     finally:
         client.close()
+    return 0
+
+
+def _save_rgb_png(img: np.ndarray, path: Path) -> bool:
+    """Write an RGB numpy image as PNG through Qt (no app instance needed)."""
+    from PySide6.QtGui import QImage
+
+    h, w = img.shape[:2]
+    qimg = QImage(img.data, w, h, int(img.strides[0]), QImage.Format.Format_RGB888).copy()
+    return qimg.save(str(path), "PNG")
+
+
+def _save_rgb_ppm(img: np.ndarray, path: Path) -> None:
+    h, w = img.shape[:2]
+    with path.open("wb") as fh:
+        fh.write(f"P6\n{w} {h}\n255\n".encode("ascii"))
+        fh.write(np.ascontiguousarray(img, dtype=np.uint8).tobytes())
+
+
+def cmd_signal(cfg: Config, args) -> int:
+    """Grab the pixel-signal grid from WoW's top-left corner and save it, to see why nothing is read."""
+    from . import protocol, winapi
+    from .signal_reader import ScreenCapture, TYPE_NAMES
+    from .wow_window import WowWindowTracker
+
+    if args.delay > 0:
+        print(f"Czekam {args.delay:g} s - najedz na linie czatu w WoW...")
+        time.sleep(args.delay)
+    tracker = WowWindowTracker(cfg.get("wow.process_names", []) or [], [])
+    win = tracker.find(max_age=0)
+    if win is None:
+        print("Nie znaleziono okna WoW (gra nie działa?).")
+        return 1
+    x, y, client_w, client_h = win.client
+    print(f"hwnd: {win.hwnd}")
+    print(f"proces: {win.process}")
+    print(f"client: x={x} y={y} w={client_w} h={client_h}")
+    print(f"foreground: {winapi.foreground_window() == win.hwnd}")
+    w = min(args.width, client_w)
+    h = min(args.height, client_h)
+    if w <= 0 or h <= 0:
+        print(f"Obszar klienta za mały: {client_w}x{client_h}")
+        return 1
+    cap = ScreenCapture()
+    try:
+        img = cap.grab(x, y, w, h)
+    except OSError as exc:
+        print(f"Przechwycenie nieudane: {exc}")
+        return 1
+    finally:
+        cap.close()
+
+    out = resolve_path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if _save_rgb_png(img, out):
+        print(f"PNG: {out}")
+    else:
+        out = out.with_suffix(".ppm")
+        _save_rgb_ppm(img, out)
+        print(f"PNG nieudany, zapisano PPM: {out}")
+    up = np.repeat(np.repeat(img, 4, axis=0), 4, axis=1)
+    up_out = out.with_name(out.stem + "_4x.png")
+    if _save_rgb_png(up, up_out):
+        print(f"PNG 4x: {up_out}")
+    else:
+        up_out = up_out.with_suffix(".ppm")
+        _save_rgb_ppm(up, up_out)
+        print(f"PNG 4x nieudany, zapisano PPM: {up_out}")
+
+    print(f"obraz (h, w, kanaly): {img.shape}")
+    colors = np.unique(img.reshape(-1, 3), axis=0)
+    print(f"unikalne kolory RGB: {len(colors)}")
+    cell = protocol.CELL_PX
+    if img.shape[0] >= cell and img.shape[1] >= protocol.CALIB_CELLS * cell:
+        block = img[0:cell, 0:protocol.CALIB_CELLS * cell].reshape(cell, protocol.CALIB_CELLS, cell, 3)
+        means = block.mean(axis=(0, 2))
+        print(f"kalibracja ({protocol.CALIB_CELLS} komorki {cell}x{cell}, srednie RGB):")
+        for i, m in enumerate(means):
+            print(f"  cell {i}: ({m[0]:.1f}, {m[1]:.1f}, {m[2]:.1f})")
+    else:
+        print("kalibracja: obraz za mały")
+
+    names = {protocol.TYPE_HOVER: "hover", protocol.TYPE_KEEP: "keep", protocol.TYPE_TEST: "test"}
+    names.update(TYPE_NAMES)
+    pkt = protocol.try_decode(img)
+    if pkt is not None:
+        print(f"dekodowanie: {names.get(pkt.type, str(pkt.type))} seq={pkt.seq} tekst={len(pkt.text)} znakow")
+    else:
+        reason = "brak dopasowanej siatki"
+        try:
+            protocol.decode_image(img)
+        except protocol.DecodeError as exc:
+            reason = str(exc)
+        print(f"dekodowanie: nic ({reason})")
     return 0
 
 
@@ -415,6 +588,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("cloud")
     p.add_argument("text", nargs="+")
+    p = sub.add_parser("tts")
+    p.add_argument("--download", action="store_true", help="pobierz polski głos Piper pl_PL-gosia-medium")
+    p.add_argument("--test", metavar="TEXT", help="syntezuj tekst do data/tts_test.wav")
+    p.add_argument("--engine", choices=["auto", "piper", "sapi"], help="nadpisz voice.local.engine")
+    p = sub.add_parser("signal")
+    p.add_argument("--delay", type=float, default=3.0, help="ile sekund czekać (najedź na linię czatu w WoW)")
+    p.add_argument("--out", default="logs/signal_debug.png", help="plik PNG z podglądem siatki")
+    p.add_argument("--width", type=int, default=320, help="szerokość przechwycenia w pikselach")
+    p.add_argument("--height", type=int, default=120, help="wysokość przechwycenia w pikselach")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -434,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
         "install-addon": cmd_install_addon,
         "router": cmd_router,
         "cloud": cmd_cloud,
+        "tts": cmd_tts,
+        "signal": cmd_signal,
     }[args.cmd](cfg, args)
 
 

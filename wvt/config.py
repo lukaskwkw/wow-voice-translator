@@ -57,12 +57,21 @@ DEFAULTS: dict[str, Any] = {
         "plan_thinking": "low",
         "max_knowledge_chars": 480,  # answers from the guides and the quest base may be longer than small talk
         "log_file": "logs/assistant.jsonl",  # what you asked and what she answered (privacy.log_assistant)
+        "history_overlay": True,  # always-on-top conversation history over WoW
+        "history_limit": 10,      # entries shown in the overlay/tab
         # assistant.llm: local | gemini | openai - with gemini she talks through Google Gemini (key in .env, section
         # "gemini"), with openai through any OpenAI-compatible cloud API (section "assistant.openai"); translations
         # stay local and the local model answers whenever the cloud fails
         "llm": "local",
         "openai": {"base_url": "https://opencode.ai/inference/openai/v1", "api_key_env": "OPENCODE_API_KEY",
-                   "model": "deepseek-v4.1-flash", "timeout_s": 20, "max_output_tokens": 4096},
+                   "model": "deepseek-v4.1-flash", "timeout_s": 20, "max_output_tokens": 4096,
+                   # reasoning models count thinking tokens against max_tokens; the assistant asks for short answers
+                   # in the prompt, so a higher cap does not force a longer answer (raise to 4096 if finish=length)
+                   "min_output_tokens": 2048,
+                   # top-level reasoning_effort: low | high | max | none | "" (empty sends nothing); "low" keeps the
+                   # thinking short and avoids finish=length. OpenCode Zen and OpenRouter (shorthand for
+                   # reasoning.effort) both accept it; do not put "#low" in the model name, that is client-only
+                   "reasoning_effort": "low"},
         "router": "local",  # local | jev - when the rules miss, ask Jev before falling back to chat
         "jev": {"order": ["openrouter", "opencode"],
                 "base_url": "https://opencode.ai/inference/systemone/v1/systemone",
@@ -194,6 +203,9 @@ DEFAULTS: dict[str, Any] = {
     # IN THE GAME (panel above the chat, /wvt say|party|lang) - off channels cost nothing.
     "voice": {
         "enabled": True,  # master switch of the app side
+        # auto: ElevenLabs when the key is in .env, otherwise the local voice; local: always local;
+        # elevenlabs: only the remote client (a missing key leaves the app text-only)
+        "backend": "auto",  # auto | elevenlabs | local
         "api_key_env": "ELEVENLABS_API_KEY",  # read from the git-ignored .env
         "model_id": "eleven_v4_turbo",
         "output_format": "pcm_24000",
@@ -240,6 +252,16 @@ DEFAULTS: dict[str, Any] = {
             "database": "wow_voice_translator",
             "timeout_ms": 1500,
             "fallback_dir": "data",  # local JSON store when MongoDB is not reachable
+        },
+        # Local voice for Iskra (no ElevenLabs key): Piper first, the Windows SAPI voice as fallback.
+        # Character voices stay text-only while this backend is active.
+        "local": {
+            "enabled": True,  # checkbox in the app (Settings -> Glos Iskry)
+            "engine": "auto",  # auto | piper | sapi
+            "piper_model": "models/piper/pl_PL-gosia-medium.onnx",
+            "piper_voice": "pl_PL-gosia-medium",
+            "sapi_voice": "pl-PL",  # Microsoft Paulina
+            "volume": 1.0,
         },
     },
     # Spoken-English cleanup before ElevenLabs (EN mode): brb -> be right back, oom -> out of mana...

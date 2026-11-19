@@ -30,6 +30,8 @@ import httpx
 import numpy as np
 
 log = logging.getLogger(__name__)
+# the cloud answer path: "cloud model X failed (...) - the local model answers this one" means the cloud was tried
+cloud_log = logging.getLogger("wvt.cloud")
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
@@ -183,7 +185,10 @@ class FallbackLLM:
                 return self.primary.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
                                          timeout=timeout, thinking=thinking)
             except CloudError as exc:
-                log.info("%s - the local model answers this one", exc)
+                cloud_log.info("cloud model %s failed (%s) - the local model answers this one",
+                               self.primary.model_name, exc)
+        else:
+            cloud_log.debug("cloud model %s unavailable - the local model answers", self.primary.model_name)
         self.fallbacks += 1
         return self.fallback.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop, timeout=timeout)
 
@@ -327,7 +332,9 @@ def assistant_llm(cfg, local):
 
             primary = OpenAICompatLLM(key, o.get("model", "deepseek-v4.1-flash"),
                                       o.get("base_url", "https://opencode.ai/inference/openai/v1"),
-                                      float(o.get("timeout_s", 20)), int(o.get("max_output_tokens", 4096)))
+                                      float(o.get("timeout_s", 20)), int(o.get("max_output_tokens", 4096)),
+                                      min_output_tokens=int(o.get("min_output_tokens", 2048)),
+                                      reasoning_effort=str(o.get("reasoning_effort", "low") or ""))
         except Exception as exc:  # a missing module or a bad config must not stop startup
             log.warning("the OpenAI-compatible assistant model could not be set up (%s) - the local model answers",
                         exc)

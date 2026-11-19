@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QSystemTrayIcon,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +44,7 @@ from .chat_insert import ChatInserter, build_chat_line, set_clipboard_text
 from .config import ROOT, Config
 from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
+from .history_overlay import HistoryOverlay, render_history_html
 from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
 from .pipeline import HistoryItem, PushToTalkPipeline
@@ -114,6 +117,7 @@ class MainWindow(QWidget):
 
         tabs = QTabWidget()
         tabs.addTab(self._build_translate_tab(), "Tłumacz")
+        tabs.addTab(self._build_history_tab(), "Iskra")
         tabs.addTab(self._build_settings_tab(), "Ustawienia")
         self.voice_tab = VoiceTab(app)
         tabs.addTab(self.voice_tab, "Głosy")
@@ -237,6 +241,44 @@ class MainWindow(QWidget):
         while self.history.count() > 10:
             self.history.takeItem(self.history.count() - 1)
 
+    # ------------------------------------------------------------------ Iskra history tab
+    def _build_history_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        self.assistant_history = QTextBrowser()
+        self.assistant_history.setReadOnly(True)
+        self.assistant_history.setOpenExternalLinks(False)
+        lay.addWidget(self.assistant_history, 1)
+        row = QHBoxLayout()
+        b_clear = QPushButton("Wyczyść historię")
+        b_clear.clicked.connect(self.on_clear_assistant_history)
+        row.addWidget(b_clear)
+        row.addStretch(1)
+        lay.addLayout(row)
+        timer = QTimer(self)
+        timer.timeout.connect(self.refresh_assistant_history)
+        timer.start(700)
+        self._history_timer = timer
+        self.refresh_assistant_history()
+        return w
+
+    def on_clear_assistant_history(self) -> None:
+        self.app._clear_assistant_history()
+        self.refresh_assistant_history()
+
+    def refresh_assistant_history(self) -> None:
+        if not self.isVisible():
+            return
+        a = self.app.assistant
+        items = a.transcript_items() if a is not None else []
+        limit = int(self.app.cfg.get("assistant.history_limit", 10) or 10)
+        name = str(self.app.cfg.get("assistant.name", "Iskra") or "Iskra")
+        bar = self.assistant_history.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 2
+        self.assistant_history.setHtml(render_history_html(items, limit, name))
+        if at_bottom:
+            bar.setValue(bar.maximum())
+
     # ------------------------------------------------------------------ settings tab
     def _build_settings_tab(self) -> QWidget:
         cfg = self.app.cfg
@@ -354,6 +396,16 @@ class MainWindow(QWidget):
         self.openai_key_env = QLineEdit(str(cfg.get("assistant.openai.api_key_env") or ""))
         cf.addRow("Zmienna klucza (.env):", self.openai_key_env)
 
+        self.openai_reasoning = QComboBox()
+        self.openai_reasoning.addItem("low (zalecane)", "low")
+        self.openai_reasoning.addItem("high", "high")
+        self.openai_reasoning.addItem("max", "max")
+        self.openai_reasoning.addItem("none / bez rozumowania", "none")
+        self.openai_reasoning.addItem("Domyślny (nie wysyłaj)", "")
+        self.openai_reasoning.setCurrentIndex(
+            max(0, self.openai_reasoning.findData(str(cfg.get("assistant.openai.reasoning_effort", "low") or ""))))
+        cf.addRow("Reasoning effort:", self.openai_reasoning)
+
         self.openai_key = QLineEdit()
         self.openai_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.openai_key.setPlaceholderText("wpisz klucz, aby zapisać do .env (puste = bez zmian)")
@@ -405,6 +457,41 @@ class MainWindow(QWidget):
         cloud_note.setWordWrap(True)
         cf.addRow(cloud_note)
         lay.addWidget(cloud_box)
+
+        local_box = QGroupBox("Głos Iskry (gdy brak ElevenLabs)")
+        lf = QFormLayout(local_box)
+        self.local_tts = QCheckBox("Lokalny TTS: Piper → SAPI (tylko Iskra)")
+        self.local_tts.setChecked(bool(cfg.get("voice.local.enabled", True)))
+        lf.addRow(self.local_tts)
+        self.local_tts_engine = QComboBox()
+        self.local_tts_engine.addItem("Automatycznie (Piper → SAPI)", "auto")
+        self.local_tts_engine.addItem("Piper", "piper")
+        self.local_tts_engine.addItem("SAPI (Microsoft Paulina)", "sapi")
+        self.local_tts_engine.setCurrentIndex(
+            max(0, self.local_tts_engine.findData(cfg.get("voice.local.engine", "auto"))))
+        lf.addRow("Silnik:", self.local_tts_engine)
+        local_note = QLabel("Zmiany po restarcie. Piper: pip install piper-tts, potem "
+                            "python -m wvt.cli tts --download. Bez Piper działa SAPI Paulina. "
+                            "To ustawienie nie wymaga reinstalacji addonu.")
+        local_note.setWordWrap(True)
+        lf.addRow(local_note)
+        lay.addWidget(local_box)
+
+        hist_box = QGroupBox("Iskra: historia rozmów")
+        hf = QFormLayout(hist_box)
+        self.history_overlay_cb = QCheckBox("Pokaż overlay z historią rozmów nad grą")
+        self.history_overlay_cb.setChecked(bool(cfg.get("assistant.history_overlay", True)))
+        hf.addRow(self.history_overlay_cb)
+        self.history_limit = QSpinBox()
+        self.history_limit.setRange(5, 30)
+        self.history_limit.setSuffix(" wpisów")
+        self.history_limit.setValue(int(cfg.get("assistant.history_limit", 10) or 10))
+        hf.addRow("Liczba wpisów:", self.history_limit)
+        hist_note = QLabel("Overlay można też włączyć/wyłączyć z tray. Zmiany działają po zapisaniu; "
+                           "historia jest w pamięci aplikacji.")
+        hist_note.setWordWrap(True)
+        hf.addRow(hist_note)
+        lay.addWidget(hist_box)
 
         hov_box = QGroupBox("Czat: tłumaczenie po najechaniu myszką (wymaga addonu)")
         hv = QFormLayout(hov_box)
@@ -516,7 +603,11 @@ class MainWindow(QWidget):
         cfg.set("insert.confirm", self.confirm_edit.isChecked())
         cfg.set("hover.enabled", self.hover_enabled.isChecked())
         cfg.set("hover.font_scale", round(self.font_scale.value(), 2))
+        cfg.set("voice.local.enabled", self.local_tts.isChecked())
+        cfg.set("voice.local.engine", self.local_tts_engine.currentData())
         cfg.set("assistant.llm", self.assistant_llm.currentData())
+        cfg.set("assistant.history_overlay", self.history_overlay_cb.isChecked())
+        cfg.set("assistant.history_limit", int(self.history_limit.value()))
         base = self.openai_base.text().strip() or "https://opencode.ai/inference/openai/v1"
         model = self.openai_model.text().strip()
         if not model:
@@ -527,6 +618,7 @@ class MainWindow(QWidget):
         cfg.set("assistant.openai.base_url", base)
         cfg.set("assistant.openai.model", model)
         cfg.set("assistant.openai.api_key_env", self.openai_key_env.text().strip() or "OPENCODE_API_KEY")
+        cfg.set("assistant.openai.reasoning_effort", self.openai_reasoning.currentData() or "")
         cfg.set("assistant.router", self.router_mode.currentData())
         cfg.set("assistant.jev.model", self.jev_model.text().strip() or "jev-1.13")
         cfg.set("assistant.jev.min_confidence", round(self.jev_confidence.value(), 2))
@@ -634,6 +726,7 @@ class TranslatorApp:
         self.reader: Optional[SignalReader] = None
         self.voice = None  # VoiceManager, built in _init_voice
         self.assistant = None  # wvt.assistant.Assistant, built with the models
+        self.history_overlay = None  # wvt.history_overlay.HistoryOverlay, built on first use
         self.world = None  # wvt.kb.world.World (quests, NPCs, coordinates), loaded in the background
         self.kb = None  # wvt.kb.store.KnowledgeBase (guides), loaded in the background
         self.instances: list = []  # dungeons and raids with level ranges
@@ -703,6 +796,7 @@ class TranslatorApp:
                 self.recorder.open()
             except Exception as exc:
                 self.bridge.status.emit("error", "Mikrofon niedostępny", [str(exc)], 8.0)
+        QTimer.singleShot(800, self._sync_history_overlay)  # the overlay comes up while the models load
 
     def _load_models(self) -> None:
         from .cli import make_llm, make_stt
@@ -773,12 +867,16 @@ class TranslatorApp:
             self.bridge.status.emit("error", "Nie udało się załadować modeli", [str(exc), "Szczegóły: logs/wvt.log"], 15.0)
 
     def _init_voice(self) -> None:
-        """ElevenLabs voices for /say and /party. Missing key or store never stops the app."""
+        """Voice output: ElevenLabs when a key is configured, otherwise the local TTS (Piper/SAPI).
+
+        Missing key, store or local engine never stops the app - Iskra simply stays text-only.
+        """
         try:
             from .config import resolve_path
             from .envfile import load_env, secret
             from .voice.budget import DailyBudget
             from .voice.elevenlabs import ElevenLabsClient
+            from .voice.local import LocalTTS
             from .voice.manager import VoiceManager
             from .voice.mixer import AudioMixer
             from .voice.normalizer import TTSNormalizer
@@ -786,32 +884,54 @@ class TranslatorApp:
             from .voice.store import open_store
 
             v = self.cfg["voice"]
+            backend = str(v.get("backend", "auto") or "auto").lower()
+            local_cfg = v.get("local") or {}
+            local_enabled = bool(local_cfg.get("enabled", True))
             load_env()
             api_key = secret(v.get("api_key_env", "ELEVENLABS_API_KEY"))
-            if not api_key:
-                self.voice_status = "wyłączone – brak ELEVENLABS_API_KEY w pliku .env"
+            use_local = backend == "local" or (backend == "auto" and not api_key)
+            if use_local and not local_enabled:
+                self.voice_status = "wyłączone – brak ElevenLabs i lokalny TTS"
                 return
+            if use_local:
+                tts = LocalTTS(local_cfg)
+                if not tts.available():
+                    self.voice_status = "wyłączone – lokalny TTS niedostępny (Piper/SAPI)"
+                    return
+            else:
+                if not api_key:
+                    self.voice_status = "wyłączone – brak ELEVENLABS_API_KEY w pliku .env"
+                    return
+                tts = ElevenLabsClient(api_key, v.get("model_id", "eleven_v4_turbo"),
+                                       v.get("output_format", "pcm_24000"),
+                                       float(v.get("request_timeout_s", 15)), int(v.get("max_retries", 2)))
             data_dir = resolve_path(v["store"].get("fallback_dir", "data"))
             store = open_store(v["store"], data_dir)
             resolver = VoiceResolver(store, v.get("realm", "Forever"), v.get("race_aliases") or {},
                                      v.get("unknown_race_pool", "Human"))
-            tts = ElevenLabsClient(api_key, v.get("model_id", "eleven_v4_turbo"), v.get("output_format", "pcm_24000"),
-                                   float(v.get("request_timeout_s", 15)), int(v.get("max_retries", 2)))
             mixer = AudioMixer(int(v.get("sample_rate", 24000)), v.get("output_device"))
             normalizer = TTSNormalizer(self.cfg["normalizer"], llm=self.llm if self.translator else None)
-            budget = DailyBudget(data_dir / "voice_usage.json", int(v.get("daily_char_budget", 30000)))
+            # the local engine is free: no daily cap (ElevenLabs keeps its daily_char_budget)
+            budget = DailyBudget(data_dir / "voice_usage.json",
+                                 0 if use_local else int(v.get("daily_char_budget", 30000)))
             manager = VoiceManager(v, tts, resolver, mixer, normalizer, budget, translator=self.translator,
                                    on_event=self.bridge.voice_event.emit,
                                    log_texts=bool(self.cfg.get("privacy.log_texts", False)))
+            manager.default_voice_id = "local:pl" if use_local else ""
+            manager.local_only = use_local
             manager.start()
             self.voice = manager
             if self.translator is not None:  # models finished first
                 manager.translator = self.translator
                 manager.normalizer.llm = self.llm
-            pools = resolver.profile_count
-            self.voice_status = (f"gotowe – {pools} głosów, {store.description}" if pools else
-                                 f"brak głosów – uruchom: python -m wvt.voice.design ({store.description})")
-            log.info("voices ready: %d profiles, store %s", pools, store.kind)
+            if use_local:
+                self.voice_status = "lokalny TTS – Iskra mówi (Piper/SAPI), postacie tekstowo"
+                log.info("local TTS ready: %s, store %s", tts.describe(), store.kind)
+            else:
+                pools = resolver.profile_count
+                self.voice_status = (f"gotowe – {pools} głosów, {store.description}" if pools else
+                                     f"brak głosów – uruchom: python -m wvt.voice.design ({store.description})")
+                log.info("voices ready: %d profiles, store %s", pools, store.kind)
         except Exception as exc:
             log.exception("voice init failed")
             self.voice_status = f"BŁĄD: {exc}"
@@ -905,6 +1025,7 @@ class TranslatorApp:
             self.reader.enabled = bool(self.cfg.get("hover.enabled", True))
         self.act_hover.setChecked(bool(self.cfg.get("hover.enabled", True)))
         self._start_hotkeys()
+        self._sync_history_overlay()
 
     # ------------------------------------------------------------------ confirm before insert
     def _on_confirm(self, item: HistoryItem) -> None:
@@ -991,6 +1112,10 @@ class TranslatorApp:
         self.act_voice.setChecked(bool(self.cfg.get("voice.enabled", True)))
         self.act_voice.toggled.connect(self._toggle_voice)
         menu.addAction(self.act_voice)
+        self.act_history = QAction("Historia rozmów Iskry", menu, checkable=True)
+        self.act_history.setChecked(bool(self.cfg.get("assistant.history_overlay", True)))
+        self.act_history.toggled.connect(self._toggle_history)
+        menu.addAction(self.act_history)
         act_silence = QAction("Przerwij odczyt", menu)
         act_silence.triggered.connect(lambda: self.voice and self.voice.silence())
         menu.addAction(act_silence)
@@ -1013,6 +1138,49 @@ class TranslatorApp:
             self.reader.enabled = on
         if not on:
             self.hover.hide()
+
+    # ------------------------------------------------------------------ Iskra history overlay
+    def _ensure_history_overlay(self) -> HistoryOverlay:
+        if self.history_overlay is None:
+            self.history_overlay = HistoryOverlay(
+                lambda: self.assistant.transcript_items() if self.assistant else [],
+                self._clear_assistant_history, self.cfg)
+            self.history_overlay.closed.connect(self._on_history_closed)
+        return self.history_overlay
+
+    def _sync_history_overlay(self) -> None:
+        on = bool(self.cfg.get("assistant.history_overlay", True))
+        act = getattr(self, "act_history", None)
+        if act is not None and act.isChecked() != on:
+            act.blockSignals(True)
+            act.setChecked(on)
+            act.blockSignals(False)
+        if on:
+            ov = self._ensure_history_overlay()
+            if not ov.isVisible():
+                ov.show()  # WA_ShowWithoutActivating: appears without stealing focus from WoW
+            ov.refresh()
+        elif self.history_overlay is not None:
+            self.history_overlay.hide()
+
+    def _toggle_history(self, on: bool) -> None:
+        self.cfg.set("assistant.history_overlay", on)
+        self._sync_history_overlay()
+        cb = getattr(self.window, "history_overlay_cb", None)
+        if cb is not None and cb.isChecked() != on:
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+
+    def _on_history_closed(self) -> None:
+        # tray state only; the config stays as saved, so the next sync may show it again
+        self.act_history.blockSignals(True)
+        self.act_history.setChecked(False)
+        self.act_history.blockSignals(False)
+
+    def _clear_assistant_history(self) -> None:
+        if self.assistant:
+            self.assistant.clear_transcript()
 
     def quit(self) -> None:
         try:

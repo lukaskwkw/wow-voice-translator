@@ -84,6 +84,8 @@ class VoiceManager:
         self.log_texts = log_texts
         self.enabled = bool(cfg.get("enabled", True))
         self.muted = False
+        self.default_voice_id = ""  # the assistant's voice when no ElevenLabs key is configured
+        self.local_only = False  # local TTS: character voices stay text-only, Iskra still speaks
         self._queue: deque[VoiceJob] = deque()
         self._cv = threading.Condition()
         self._speaking: set[str] = set()
@@ -175,6 +177,8 @@ class VoiceManager:
             return "log-only", None  # a line only the assistant reads
         if not self.enabled or self.muted:
             return "off", None
+        if self.local_only:
+            return "off", None  # local TTS: character voices stay text-only (say() bypasses this)
         kind = pkt.chat_kind_name
         if kind in SAY_KINDS:
             channel = "say"

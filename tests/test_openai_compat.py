@@ -41,7 +41,7 @@ def test_request_url_headers_and_body():
     assert "secret-key-123" not in str(req.url)
     body = json.loads(req.content)
     assert body == {"model": "deepseek-v4.1-flash", "messages": messages, "stream": False,
-                    "max_tokens": 120, "temperature": 0.4, "stop": ["\n\n"]}
+                    "max_tokens": 2048, "temperature": 0.4, "stop": ["\n\n"]}  # 120 is raised to the floor
 
 
 def test_a_content_list_is_joined_and_a_trailing_slash_dropped():
@@ -50,7 +50,7 @@ def test_a_content_list_is_joined_and_a_trailing_slash_dropped():
     llm, seen = _llm(lambda r: httpx.Response(200, json=answer), base_url=BASE + "/")
     assert llm.chat([{"role": "user", "content": "hej"}], max_tokens=0)[0] == "Cześć!"
     assert str(seen[0].url) == BASE + "/chat/completions"
-    assert json.loads(seen[0].content)["max_tokens"] == llm.max_output_tokens  # max_tokens 0 -> the configured cap
+    assert json.loads(seen[0].content)["max_tokens"] == llm.min_output_tokens  # max_tokens 0 -> the floor
 
 
 def test_a_base_url_ending_in_chat_completions_is_not_doubled():
@@ -74,6 +74,72 @@ def test_a_limit_makes_the_cloud_rest_and_raise():
         llm.chat([{"role": "user", "content": "hej"}])
     assert not llm.available() and llm.failures == 1
     assert len(seen) == 1
+
+
+def test_max_tokens_is_clamped_between_the_floor_and_the_ceiling():
+    llm, seen = _llm(lambda r: httpx.Response(200, json=_answer()))
+    llm.chat([{"role": "user", "content": "hej"}], max_tokens=120)
+    llm.chat([{"role": "user", "content": "hej"}], max_tokens=8192)
+    llm.chat([{"role": "user", "content": "hej"}])  # the default 200 is below the floor too
+    sent = [json.loads(r.content)["max_tokens"] for r in seen]
+    assert sent == [2048, 4096, 2048]
+    assert llm.min_output_tokens == 2048 and llm.max_output_tokens == 4096
+
+
+def test_a_zero_ceiling_means_no_ceiling():
+    llm, seen = _llm(lambda r: httpx.Response(200, json=_answer()), max_output_tokens=0)
+    llm.chat([{"role": "user", "content": "hej"}], max_tokens=8192)
+    assert json.loads(seen[0].content)["max_tokens"] == 8192
+
+
+def test_reasoning_effort_goes_into_the_body_and_empty_sends_nothing():
+    llm, seen = _llm(lambda r: httpx.Response(200, json=_answer()), reasoning_effort="low")
+    llm.chat([{"role": "user", "content": "hej"}], max_tokens=120)
+    body = json.loads(seen[0].content)
+    assert body["reasoning_effort"] == "low" and body["max_tokens"] == 2048
+    assert "reasoning" not in body and "thinking" not in body
+    plain, seen_plain = _llm(lambda r: httpx.Response(200, json=_answer()))
+    plain.chat([{"role": "user", "content": "hej"}])
+    assert "reasoning_effort" not in json.loads(seen_plain[0].content)
+    blank, seen_blank = _llm(lambda r: httpx.Response(200, json=_answer()), reasoning_effort="  ")
+    blank.chat([{"role": "user", "content": "hej"}])
+    assert "reasoning_effort" not in json.loads(seen_blank[0].content)
+
+
+def test_positional_construction_still_works():
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=_answer())))
+    llm = OpenAICompatLLM("secret-key-123", "deepseek-v4.1-flash", BASE, 20.0, 4096, client)
+    assert llm.chat([{"role": "user", "content": "hej"}])[0] == "Hogger stoi w Elwynn."
+    assert llm.min_output_tokens == 2048 and llm.reasoning_effort == ""
+    assert llm.max_output_tokens == 4096
+
+
+def test_an_empty_answer_says_why_and_the_local_model_answers():
+    answer = {"model": "deepseek-v4.1-flash",
+              "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+              "usage": {"prompt_tokens": 12, "completion_tokens": 200,
+                        "completion_tokens_details": {"reasoning_tokens": 200}}}
+    llm, seen = _llm(lambda r: httpx.Response(200, json=answer))
+    with pytest.raises(OpenAICompatError) as err:
+        llm.chat([{"role": "user", "content": "hej"}], max_tokens=120)
+    msg = str(err.value)
+    for part in ("finish=length", "max_tokens=2048", "completion_tokens=200", "reasoning_tokens=200"):
+        assert part in msg
+    assert llm.failures == 1
+    local = FakeLocal()
+    wrapper = FallbackLLM(llm, local)
+    assert wrapper.chat([{"role": "user", "content": "hej"}], max_tokens=120)[0] == "lokalnie"
+    assert local.calls == 1 and wrapper.fallbacks == 1 and len(seen) == 2
+
+
+def test_an_empty_answer_omits_absent_usage_fields():
+    llm, _ = _llm(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": ""},
+                                                                   "finish_reason": "stop"}]}))
+    with pytest.raises(OpenAICompatError) as err:
+        llm.chat([{"role": "user", "content": "hej"}])
+    msg = str(err.value)
+    assert "finish=stop" in msg and "max_tokens=2048" in msg
+    assert "completion_tokens" not in msg and "reasoning_tokens" not in msg
 
 
 class FakeLocal:
