@@ -137,6 +137,19 @@ Without `ELEVENLABS_API_KEY` the assistant can still speak, using a local engine
 - **SAPI**: without Piper, the built-in Windows voice (Microsoft Paulina, `pl-PL`) is used. Nothing to install.
 - No addon reinstall is needed; the Lua addon still only draws text.
 
+### Speech recognition: local or cloud
+
+By default speech recognition runs locally on your GPU (Whisper large-v3-turbo, Parakeet as the fallback). Nothing leaves your PC, and this stays the default.
+
+You can switch to a cloud provider instead, e.g. on a machine without a fast GPU:
+
+- **Settings -> Rozpoznawanie mowy (STT)**: pick **Cloud (API OpenAI-compatible)**, set the base URL, the model and the name of the key variable, and paste the key (it is written to `.env`; leaving the field empty keeps the current key).
+- Any provider with an OpenAI-compatible `/audio/transcriptions` endpoint works. For Groq use `https://api.groq.com/openai/v1` with `whisper-large-v3-turbo` and `GROQ_API_KEY`; OpenAI's own API and OpenRouter also work when their audio endpoint serves the model you pick.
+- **Audio is sent to the provider** (Groq/OpenAI/OpenRouter) for every utterance; nothing about the audio or the transcript is logged locally.
+- Changes need an app restart (`stt.backend`, `stt.cloud.*`).
+
+The equivalent `config.json` keys are described in [docs/SZCZEGOLY.md](docs/SZCZEGOLY.md).
+
 ### Who speaks and writes in which language
 
 | What | Language | How to change |
@@ -152,6 +165,7 @@ Without `ELEVENLABS_API_KEY` the assistant can still speak, using a local engine
 Hold **mouse button 5** and say what you want in Polish.
 - She answers aloud with an ElevenLabs voice (`assistant.voice_id`) or, without a key, with the local voice (Piper/SAPI - see above). With both off she answers in text on screen.
 - When something has to happen in the game, she types a ready command into the chat box, for example `/wvt inv Ann Bob`. **It runs only when you press Enter**; Esc cancels.
+- **Review the transcript first (optional).** With **Settings → Push-to-talk → "Pokaż tekst do edycji przed wysłaniem do Iskry (Enter zatwierdza, Esc anuluje)"** (or `"assistant": {"confirm_transcript": true}`, the default) a small always-on-top box shows what she heard after mouse5. Fix it and press **Enter** to let Iskra process it, or **Esc** / **Anuluj** to drop it. This is separate from the chat-line confirm above: that one edits the final line, this one edits the Polish transcript.
 
 | Say, for example | What happens |
 |---|---|
@@ -241,6 +255,22 @@ Hold **mouse button 5** and say what you want in Polish.
 - The overlay opens on the right of the screen a moment after start-up when `assistant.history_overlay` is on. Turn it on or off from the tray ("Historia rozmów Iskry") or with the Settings checkbox "Pokaż overlay z historią rozmów nad grą"; `assistant.history_limit` (5-30) sets how many entries both views show.
 - The overlay is a normal window: you can scroll it and close it, and it does not take focus from the game when it appears. It also stays visible while the app window is hidden in the tray.
 - This needs no addon changes and no addon reinstall.
+
+### Logs: where did the answer come from?
+
+At the default INFO level the log says which path answered each question, without the question or answer text:
+
+```
+assistant: local=chat route=jev final=quest_info sources=QuestieDB ms=1912
+Jev: label=quest_info provider=openrouter confidence=0.91 380 ms
+assistant LLM: provider=openai model=deepseek-v4.1-flash variant=low fallback=False finish=stop 1840 ms
+assistant LLM: provider=local model=Nemotron variant=thinking-off fallback=True fallback_from=deepseek-v4.1-flash finish=stop 640 ms
+```
+
+- `local` is what the local rules understood, `route` is `rules`, `chat` or `jev`, and `final` is the intent that answered.
+- `fallback=True` means the cloud model failed and the local model answered; `fallback_from` names the cloud model.
+- `variant` is the thinking level for Gemini/OpenAI-compatible models, or `thinking-off` for the local model.
+- The text of questions and answers stays out of the log unless `privacy.log_assistant` is on; token usage is logged only at `logging.level: "DEBUG"`.
 
 ## Configuration
 

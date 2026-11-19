@@ -32,7 +32,17 @@ def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra")
         fixed = html.escape(str(e.get("fixed") or ""))
         intent = html.escape(str(e.get("intent") or ""))
         ms = e.get("ms")
-        meta = intent + (f" · {ms} ms" if ms is not None else "")
+        bits = [intent, f"{ms} ms" if ms is not None else ""]
+        llm = e.get("llm") if isinstance(e.get("llm"), dict) else {}
+        if llm:
+            who = "/".join(html.escape(str(x)) for x in (llm.get("provider"), llm.get("model")) if x)
+            if who:
+                bits.append(who)
+            if llm.get("variant"):
+                bits.append("variant=" + html.escape(str(llm["variant"])))
+            if llm.get("fallback"):
+                bits.append("fallback=local")
+        meta = " · ".join(b for b in bits if b)
         block = (
             f"<div style='margin-bottom:10px'>"
             f"<span style='color:#888888'>{when}</span> "

@@ -167,7 +167,8 @@ class OpenAICompatLLM:
             raise OpenAICompatError(200, f"empty answer ({', '.join(why)})")
         log.debug("cloud answer: finish=%s usage=%s", finish, usage)
         return text, {"ms": self.last_ms, "finish": finish, "usage": usage,
-                      "model": data.get("model", self.model)}
+                      "model": data.get("model", self.model), "provider": "openai",
+                      "variant": self.reasoning_effort or "default", "max_tokens": requested}
 
     def close(self) -> None:
         self._client.close()

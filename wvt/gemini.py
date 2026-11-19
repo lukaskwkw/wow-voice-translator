@@ -158,7 +158,8 @@ class GeminiLLM:
             block = (data.get("promptFeedback") or {}).get("blockReason", "")
             raise GeminiError(200, f"empty answer ({finish or block or 'no candidate'})")
         return text, {"ms": self.last_ms, "finish": finish, "usage": data.get("usageMetadata", {}),
-                      "model": data.get("modelVersion", self.model)}
+                      "model": data.get("modelVersion", self.model), "provider": "gemini",
+                      "variant": self.thinking_level}
 
     def close(self) -> None:
         self._client.close()
@@ -180,17 +181,29 @@ class FallbackLLM:
     def chat(self, messages: list[dict], max_tokens: int = 200, temperature: float = 0.0,
              stop: list[str] | None = None, timeout: float | None = None,
              thinking: Optional[str] = None) -> tuple[str, dict]:
+        primary_error = ""
         if self.primary.available():
             try:
-                return self.primary.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
-                                         timeout=timeout, thinking=thinking)
+                text, meta = self.primary.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
+                                               timeout=timeout, thinking=thinking)
+                meta = dict(meta) if isinstance(meta, dict) else {}
+                meta["fallback"] = False
+                return text, meta
             except CloudError as exc:
+                primary_error = str(exc)
                 cloud_log.info("cloud model %s failed (%s) - the local model answers this one",
                                self.primary.model_name, exc)
         else:
             cloud_log.debug("cloud model %s unavailable - the local model answers", self.primary.model_name)
         self.fallbacks += 1
-        return self.fallback.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop, timeout=timeout)
+        text, meta = self.fallback.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
+                                        timeout=timeout)
+        meta = dict(meta) if isinstance(meta, dict) else {}
+        meta["fallback"] = True
+        meta["primary_model"] = self.primary.model_name
+        if primary_error:
+            meta["primary_error"] = primary_error[:160]
+        return text, meta
 
 
 class GeminiEmbedder:

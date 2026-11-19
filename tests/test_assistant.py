@@ -652,6 +652,16 @@ def test_history_html_is_rendered_oldest_first_and_escaped():
     assert limited.count("Ty:") == 1 and "drugie" in limited and "pierwsze" not in limited
 
 
+def test_history_html_shows_the_llm_provider_model_and_variant():
+    from wvt.history_text import render_history_html
+
+    items = [{"at": 1700000001, "heard": "co teraz?", "reply": "Odpowiedź", "intent": "quest_info", "ms": 1840,
+              "llm": {"provider": "openai", "model": "deepseek-v4.1-flash", "variant": "low", "fallback": False}}]
+    out = render_history_html(items)
+    assert "openai/deepseek-v4.1-flash" in out and "variant=low" in out and "1840 ms" in out
+    assert "fallback=local" not in out
+
+
 # --------------------------------------------------------------------------- the names of the moment, what you carry
 
 def bag_pkt(sync, part, parts, *lines):

@@ -214,5 +214,9 @@ class LocalLLM:
             "completion_tokens": data.get("usage", {}).get("completion_tokens"),
             "predicted_per_second": timings.get("predicted_per_second"),
             "reasoning_chars": len(msg.get("reasoning_content") or ""),
+            "provider": "local",
+            "model": self.model_name,
+            "variant": "thinking-off" if self.cfg.get("disable_thinking", True) else "default",
+            "ms": round((time.perf_counter() - t0) * 1000),
         }
         return content, info

@@ -109,9 +109,14 @@ def make_llm(cfg: Config, model: str | None = None):
 
 
 def make_stt(cfg: Config):
+    s = cfg["stt"]
+    if s.get("backend") == "cloud":
+        from .stt_cloud import CloudSTT
+
+        return CloudSTT(s.get("cloud") or {})
     from .stt import SpeechToText
 
-    return SpeechToText.from_config(cfg["stt"])
+    return SpeechToText.from_config(s)
 
 
 # --------------------------------------------------------------------------- commands

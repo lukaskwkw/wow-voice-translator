@@ -372,6 +372,7 @@ def test_gemini_request_uses_low_thinking_the_header_key_and_no_temperature():
     text, info = g.chat([{"role": "system", "content": "Iskra"}, {"role": "user", "content": "Gdzie Hogger?"}],
                         max_tokens=120, temperature=0.8)
     assert text == "Hogger stoi w Elwynn." and info["finish"] == "STOP"
+    assert info["provider"] == "gemini" and info["variant"] == "low"
     req = seen[0]
     assert str(req.url) == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
     assert "secret-key-123" not in str(req.url) and req.headers["x-goog-api-key"] == "secret-key-123"
@@ -397,8 +398,12 @@ def test_gemini_errors_fall_back_to_the_local_model_and_rest():
     local = FakeLocal()
     llm = FallbackLLM(g, local)
     msgs = [{"role": "user", "content": "Hej"}]
-    assert llm.chat(msgs)[0] == "lokalnie" and len(seen) == 1
-    assert llm.chat(msgs)[0] == "lokalnie" and len(seen) == 1  # resting: Gemini is not asked again at once
+    text, meta = llm.chat(msgs)
+    assert text == "lokalnie" and len(seen) == 1
+    assert meta["fallback"] is True and meta["primary_model"] == g.model_name and "primary_error" in meta
+    text, meta = llm.chat(msgs)
+    assert text == "lokalnie" and len(seen) == 1  # resting: Gemini is not asked again at once
+    assert meta["fallback"] is True
     assert not g.available() and local.calls == 2 and llm.fallbacks == 2
     empty, _ = _gemini(lambda r: httpx.Response(200, json={"candidates": [{"finishReason": "SAFETY"}]}))
     with pytest.raises(GeminiError, match="SAFETY"):

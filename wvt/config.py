@@ -35,6 +35,9 @@ DEFAULTS: dict[str, Any] = {
         "name": "Iskra",
         "default_key": "mouse5",  # added once to push_to_talk for configs older than the assistant
         "default_key_added": False,
+        # show the STT transcript for editing before Iskra processes it (Enter sends, Esc cancels);
+        # separate from insert.confirm, which edits the final chat line
+        "confirm_transcript": True,
         "voice_id": "",  # her ElevenLabs voice - set when you pick one on the voice rating page
         "volume": 1.0,
         "invite_window_s": 300,  # "inv me" requests younger than this are invited
@@ -108,6 +111,17 @@ DEFAULTS: dict[str, Any] = {
         "auto_gain": True,  # lift a quiet recording (up to +30 dB) without lifting the noise above the threshold
     },
     "stt": {
+        # local: Whisper/Parakeet on your GPU (default); cloud: an OpenAI-compatible /audio/transcriptions API
+        # (wvt/stt_cloud.py). Local stays the default; cloud is optional and sends the audio to the provider.
+        "backend": "local",  # local | cloud
+        "cloud": {
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key_env": "GROQ_API_KEY",  # read from the git-ignored .env
+            "model": "whisper-large-v3-turbo",
+            "language": "pl",
+            "timeout_s": 20,
+            "send_prompt": True,  # give the provider the names of the moment as "prompt"
+        },
         # Whisper large-v3-turbo, fp16 on CUDA, Polish forced: 10.4 % wrong words on the user's recordings against
         # Parakeet's 12.0 %, and 2.5 GB of VRAM instead of 3.7 (wvt/stt.py); Parakeet takes over when it cannot run
         "model_dir": "models/whisper-large-v3-turbo-onnx",

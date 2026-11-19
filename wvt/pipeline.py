@@ -44,7 +44,8 @@ class HistoryItem:
 class PushToTalkPipeline:
     def __init__(self, cfg, recorder: audio_mod.AudioRecorder, stt, translator, inserter: ChatInserter,
                  ui: PipelineUI, wow_foreground: Callable[[], bool],
-                 confirm: Callable[[HistoryItem], None] | None = None):
+                 confirm: Callable[[HistoryItem], None] | None = None,
+                 confirm_assistant: Callable[[str, dict], None] | None = None):
         self.cfg = cfg
         self.recorder = recorder
         self.stt = stt
@@ -53,7 +54,9 @@ class PushToTalkPipeline:
         self.ui = ui
         self.wow_foreground = wow_foreground
         self.confirm = confirm
+        self.confirm_assistant = confirm_assistant
         self._pending_confirm: HistoryItem | None = None
+        self._pending_assistant: tuple[str, dict] | None = None
         self.history: deque[HistoryItem] = deque(maxlen=10)
         self._busy = threading.Lock()
         self._recording_channel: Optional[str] = None
@@ -99,6 +102,9 @@ class PushToTalkPipeline:
             return
         if self._pending_confirm is not None:
             self.ui.status("busy", "Dokończ edycję tekstu…", timeout=2.0)
+            return
+        if self._pending_assistant is not None:
+            self.ui.status("busy", "Dokończ tekst dla Iskry…", timeout=2.0)
             return
         if self._busy.locked():
             self.ui.status("busy", "Poczekaj – poprzednia wypowiedź jeszcze się tłumaczy", timeout=2.0)
@@ -191,6 +197,17 @@ class PushToTalkPipeline:
             if channel == "assistant":  # her own key: no translation, she decides what to do
                 if self.assistant is None:
                     self.ui.status("info", "Asystentka jest wyłączona", ["assistant.enabled w config.json"], timeout=4)
+                    return None
+                if self.confirm_assistant is not None and bool(self.cfg.get("assistant.confirm_transcript", True)):
+                    timings["release_to_assistant_ms"] = round((time.perf_counter() - released_at) * 1000)
+                    self.last_timings = dict(timings)
+                    self._pending_assistant = (polish, dict(timings))
+                    self.ui.status("busy", "Popraw tekst dla Iskry i wciśnij Enter…", ["Esc anuluje"], timeout=0.0)
+                    try:
+                        self.confirm_assistant(polish, dict(timings))
+                    except Exception:
+                        self._pending_assistant = None
+                        raise
                     return None
                 self.ui.status("busy", f"{self._channel_label(channel)} myśli…", [f"PL: {polish}"])
                 t1 = time.perf_counter()
@@ -324,4 +341,43 @@ class PushToTalkPipeline:
         if item is not self._pending_confirm:
             return
         self._pending_confirm = None
+        self.ui.status("info", "Anulowano", timeout=1.5)
+
+    # ------------------------------------------------------------------ confirm the assistant transcript
+    def finish_assistant(self, text: str, timings: dict | None = None) -> HistoryItem | None:
+        if self._pending_assistant is None:
+            self.ui.status("info", "Nieaktualny tekst – zignorowano", timeout=2.0)
+            return None
+        self._pending_assistant = None
+        edited = (text or "").strip()
+        if not edited:
+            self.ui.status("info", "Pusty tekst – anulowano", timeout=2.0)
+            return None
+        if self.assistant is None:
+            self.ui.status("info", "Asystentka jest wyłączona", ["assistant.enabled w config.json"], timeout=4)
+            return None
+        timings = dict(timings or {})
+        self._busy.acquire()
+        try:
+            self.ui.status("busy", f"{self._channel_label('assistant')} myśli…", [f"PL: {edited}"])
+            t1 = time.perf_counter()
+            reply, line = self.assistant.handle(edited)  # speaks and inserts the command line herself
+            timings["assistant_ms"] = round((time.perf_counter() - t1) * 1000)
+            self.last_timings = timings
+            corr = getattr(self.assistant, "last_correction", None)
+            shown = corr.text if corr is not None and corr.fixes else edited
+            item = HistoryItem("assistant", shown, reply, line, timings, "assistant")
+            if self.cfg.get("privacy.keep_history", True):
+                self.history.appendleft(item)
+            self.ui.result(item)
+            return item
+        except Exception as exc:
+            log.exception("assistant pipeline failed")
+            self.ui.status("error", "Błąd – nic nie zostało wysłane", [str(exc)], timeout=8)
+            return None
+        finally:
+            self._busy.release()
+
+    def cancel_assistant(self) -> None:
+        self._pending_assistant = None
         self.ui.status("info", "Anulowano", timeout=1.5)

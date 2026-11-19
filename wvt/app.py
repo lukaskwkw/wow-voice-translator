@@ -93,6 +93,7 @@ class Bridge(QObject):
     voice_event = Signal(object)
     voices_enabled = Signal(bool)  # the assistant mutes/unmutes the character voices
     confirm = Signal(object)
+    confirm_assistant = Signal(str, object)
 
 
 class QtPipelineUI:
@@ -326,6 +327,32 @@ class MainWindow(QWidget):
         f.addRow(test_row)
         lay.addWidget(mic_box)
 
+        stt_box = QGroupBox("Rozpoznawanie mowy (STT)")
+        sf = QFormLayout(stt_box)
+        self.stt_backend = QComboBox()
+        self.stt_backend.addItem("Lokalny (Whisper/Parakeet)", "local")
+        self.stt_backend.addItem("Cloud (API OpenAI-compatible)", "cloud")
+        self.stt_backend.setCurrentIndex(max(0, self.stt_backend.findData(cfg.get("stt.backend", "local"))))
+        sf.addRow("Silnik:", self.stt_backend)
+        self.stt_cloud_base = QLineEdit(str(cfg.get("stt.cloud.base_url") or ""))
+        self.stt_cloud_base.setPlaceholderText("https://api.groq.com/openai/v1")
+        sf.addRow("Cloud – adres API (base URL):", self.stt_cloud_base)
+        self.stt_cloud_model = QLineEdit(str(cfg.get("stt.cloud.model") or ""))
+        self.stt_cloud_model.setPlaceholderText("whisper-large-v3-turbo")
+        sf.addRow("Cloud – model:", self.stt_cloud_model)
+        self.stt_cloud_key_env = QLineEdit(str(cfg.get("stt.cloud.api_key_env") or ""))
+        self.stt_cloud_key_env.setPlaceholderText("GROQ_API_KEY")
+        sf.addRow("Cloud – zmienna klucza (.env):", self.stt_cloud_key_env)
+        self.stt_cloud_key = QLineEdit()
+        self.stt_cloud_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.stt_cloud_key.setPlaceholderText("wpisz klucz, aby zapisać do .env (puste = bez zmian)")
+        sf.addRow("Cloud – klucz API:", self.stt_cloud_key)
+        stt_note = QLabel("Zmiany po restarcie. Cloud wysyła audio do providera (Groq/OpenAI/OpenRouter). "
+                          "Lokalny Whisper zostaje domyślny.")
+        stt_note.setWordWrap(True)
+        sf.addRow(stt_note)
+        lay.addWidget(stt_box)
+
         ptt_box = QGroupBox("Push-to-talk (przytrzymaj, mów po polsku, puść)")
         v = QVBoxLayout(ptt_box)
         self.ptt_table = QTableWidget(0, 2)
@@ -450,6 +477,10 @@ class MainWindow(QWidget):
         self.jev_openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.jev_openrouter_key.setPlaceholderText("klucz OpenRouter dla Jev (OPENROUTER_API_KEY), puste = bez zmian")
         cf.addRow("Klucz Jev (OpenRouter):", self.jev_openrouter_key)
+
+        self.assistant_confirm = QCheckBox("Pokaż tekst do edycji przed wysłaniem do Iskry (Enter zatwierdza, Esc anuluje)")
+        self.assistant_confirm.setChecked(bool(cfg.get("assistant.confirm_transcript", True)))
+        cf.addRow(self.assistant_confirm)
 
         cloud_note = QLabel("Zmiany modelu/routera działają po restarcie aplikacji. "
                             "Jev: OpenRouter 1.14 → OpenCode 1.13; brak klucza danego providera powoduje jego pominięcie. "
@@ -598,9 +629,15 @@ class MainWindow(QWidget):
         cfg.set("audio.silence_rms_threshold", round(self.threshold.value(), 5))
         cfg.set("audio.input_gain_db", float(self.gain_db.value()))
         cfg.set("audio.auto_gain", self.auto_gain.isChecked())
+        cfg.set("stt.backend", self.stt_backend.currentData())
+        cfg.set("stt.cloud.base_url", self.stt_cloud_base.text().strip() or "https://api.groq.com/openai/v1")
+        cfg.set("stt.cloud.model", self.stt_cloud_model.text().strip() or "whisper-large-v3-turbo")
+        stt_env = self.stt_cloud_key_env.text().strip() or "GROQ_API_KEY"
+        cfg.set("stt.cloud.api_key_env", stt_env)
         cfg.set("wow.only_when_wow_active", self.only_wow.isChecked())
         cfg.set("insert.method", self.insert_method.currentData())
         cfg.set("insert.confirm", self.confirm_edit.isChecked())
+        cfg.set("assistant.confirm_transcript", self.assistant_confirm.isChecked())
         cfg.set("hover.enabled", self.hover_enabled.isChecked())
         cfg.set("hover.font_scale", round(self.font_scale.value(), 2))
         cfg.set("voice.local.enabled", self.local_tts.isChecked())
@@ -631,6 +668,10 @@ class MainWindow(QWidget):
         if key:
             set_secret(self.openai_key_env.text().strip() or "OPENCODE_API_KEY", key)
             self.openai_key.clear()
+        stt_key = self.stt_cloud_key.text().strip()
+        if stt_key:
+            set_secret(stt_env, stt_key)
+            self.stt_cloud_key.clear()
         jev_key = self.jev_key.text().strip()
         if jev_key:
             set_secret("OPENCODE_API_KEY", jev_key)
@@ -736,6 +777,7 @@ class TranslatorApp:
         self.voice_status = "uruchamianie…"
         self.model_state = "ładowanie…"
         self._confirm_dialog = None
+        self._assistant_confirm_dialog = None
         self.hover_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wvt-hover")
         self._hover_current = None
         self._hover_window: Optional[WowWindow] = None
@@ -765,6 +807,7 @@ class TranslatorApp:
         b.voice_event.connect(self.window.voice_tab.add_event)
         b.voices_enabled.connect(lambda on: self.act_voice.setChecked(on))
         b.confirm.connect(self._on_confirm)
+        b.confirm_assistant.connect(self._on_confirm_assistant)
 
         self._level_timer = QTimer()
         self._level_timer.setInterval(100)
@@ -820,7 +863,8 @@ class TranslatorApp:
             self.stt.warmup()
             self.pipeline = PushToTalkPipeline(self.cfg, self.recorder, self.stt, self.translator, self.inserter,
                                                QtPipelineUI(self.bridge), self.tracker.foreground_is_wow,
-                                               confirm=self.bridge.confirm.emit)
+                                               confirm=self.bridge.confirm.emit,
+                                               confirm_assistant=self.bridge.confirm_assistant.emit)
             if self.cfg.get("assistant.enabled", True):
                 from .assistant import Assistant
 
@@ -1067,6 +1111,58 @@ class TranslatorApp:
         self._confirm_dialog = None
         if self.pipeline is not None:
             self.pipeline.cancel_confirm(item)
+        win = self.tracker.find(max_age=0)
+        if win is not None:
+            try:
+                from . import winapi
+
+                winapi.user32.SetForegroundWindow(win.hwnd)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ confirm the assistant transcript
+    def _on_confirm_assistant(self, text: str, timings: dict) -> None:
+        if self._assistant_confirm_dialog is not None:
+            if self.pipeline is not None:
+                self.pipeline.cancel_assistant()
+            return
+        from .assistant_confirm import AssistantConfirmDialog
+
+        dlg = AssistantConfirmDialog(text, lambda t: self._send_assistant(t, timings),
+                                     self._cancel_assistant,
+                                     str(self.cfg.get("assistant.name", "Iskra") or "Iskra"))
+        self._assistant_confirm_dialog = dlg
+        dlg.show()
+
+    def _start_assistant_when_ready(self, text: str, timings: dict, tries: int = 20) -> None:
+        """Run the assistant once WoW has focus (up to ~1 s); without WoW the command lands in the clipboard."""
+        if self.pipeline is None:
+            return
+        if self.tracker.foreground_is_wow() or tries <= 0:
+            threading.Thread(target=self.pipeline.finish_assistant, args=(text, timings), daemon=True).start()
+            return
+        QTimer.singleShot(50, lambda: self._start_assistant_when_ready(text, timings, tries - 1))
+
+    def _send_assistant(self, text: str, timings: dict) -> None:
+        self._assistant_confirm_dialog = None
+        if self.pipeline is None:
+            return
+        win = self.tracker.find(max_age=0)
+        if win is None:
+            self._start_assistant_when_ready(text, timings, 1)  # no WoW: insertion falls back to clipboard
+            return
+        try:
+            from . import winapi
+
+            winapi.user32.SetForegroundWindow(win.hwnd)
+        except Exception:
+            pass
+        QTimer.singleShot(250, lambda: self._start_assistant_when_ready(text, timings, 20))
+
+    def _cancel_assistant(self) -> None:
+        self._assistant_confirm_dialog = None
+        if self.pipeline is not None:
+            self.pipeline.cancel_assistant()
         win = self.tracker.find(max_age=0)
         if win is not None:
             try:

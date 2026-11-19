@@ -34,6 +34,7 @@ def test_request_url_headers_and_body():
     text, info = llm.chat(messages, max_tokens=120, temperature=0.4, stop=["\n\n"])
     assert text == "Hogger stoi w Elwynn." and info["finish"] == "stop"
     assert info["usage"]["completion_tokens"] == 7 and info["model"] == "deepseek-v4.1-flash"
+    assert info["provider"] == "openai" and info["variant"] == "default" and info["max_tokens"] == 2048
     req = seen[0]
     assert str(req.url) == BASE + "/chat/completions"
     assert req.headers["Authorization"] == "Bearer secret-key-123"
@@ -94,9 +95,10 @@ def test_a_zero_ceiling_means_no_ceiling():
 
 def test_reasoning_effort_goes_into_the_body_and_empty_sends_nothing():
     llm, seen = _llm(lambda r: httpx.Response(200, json=_answer()), reasoning_effort="low")
-    llm.chat([{"role": "user", "content": "hej"}], max_tokens=120)
+    _, info = llm.chat([{"role": "user", "content": "hej"}], max_tokens=120)
     body = json.loads(seen[0].content)
     assert body["reasoning_effort"] == "low" and body["max_tokens"] == 2048
+    assert info["variant"] == "low"
     assert "reasoning" not in body and "thinking" not in body
     plain, seen_plain = _llm(lambda r: httpx.Response(200, json=_answer()))
     plain.chat([{"role": "user", "content": "hej"}])
@@ -189,10 +191,24 @@ def test_fallback_uses_the_local_model_on_error():
     local = FakeLocal()
     wrapper = FallbackLLM(llm, local)
     msgs = [{"role": "user", "content": "Hej"}]
-    assert wrapper.chat(msgs)[0] == "lokalnie" and len(seen) == 1
-    assert wrapper.chat(msgs)[0] == "lokalnie" and len(seen) == 1  # resting: not asked again at once
+    text, meta = wrapper.chat(msgs)
+    assert text == "lokalnie" and len(seen) == 1
+    assert meta["fallback"] is True and meta["primary_model"] == "deepseek-v4.1-flash"
+    assert "primary_error" in meta
+    text, meta = wrapper.chat(msgs)
+    assert text == "lokalnie" and len(seen) == 1  # resting: not asked again at once
+    assert meta["fallback"] is True and "primary_error" not in meta
     assert local.calls == 2 and wrapper.fallbacks == 2
     assert wrapper.supports_thinking is False and wrapper.model_name == "deepseek-v4.1-flash (zapas: Nemotron)"
+
+
+def test_fallback_marks_a_primary_success():
+    llm, seen = _llm(lambda r: httpx.Response(200, json=_answer()))
+    wrapper = FallbackLLM(llm, FakeLocal())
+    text, meta = wrapper.chat([{"role": "user", "content": "hej"}])
+    assert text == "Hogger stoi w Elwynn." and len(seen) == 1
+    assert meta["fallback"] is False and meta["provider"] == "openai"
+    assert wrapper.fallbacks == 0
 
 
 class Cfg(dict):

@@ -698,6 +698,7 @@ class Assistant:
         self.journal_path = Path(journal_path) if journal_path else None
         self._journal_lock = threading.Lock()
         self._sources: list[str] = []  # where the last answer came from (for the journal)
+        self._last_llm: dict = {}  # provider/model/variant of the last successful LLM call
         self.translator = translator
         self.llm = llm
         self.router = jev_router(cfg)  # Jev decision model when the local rules miss (assistant.router)
@@ -1019,22 +1020,32 @@ class Assistant:
         except Exception as exc:
             log.info("Jev router failed (%s) - the local path answers", exc)
             return None
-        if decision is None or not decision.is_command:
+        if decision is None:
+            log.info("Jev: no confident command")
             return None
-        log.info("Jev: %s (confidence %.2f, %d ms)", decision.label, decision.confidence, decision.ms)
+        if not decision.is_command:
+            log.info("Jev: not a command (provider=%s, confidence=%.2f)", decision.provider, decision.confidence)
+            return None
+        log.info("Jev: label=%s provider=%s confidence=%.2f %d ms",
+                 decision.label, decision.provider, decision.confidence, decision.ms)
         return intent_from_label(decision.label, text, tuple(self._known_names()))
 
     def handle(self, polish: str) -> tuple[str, str]:
         """React to one utterance.  Returns (spoken answer, chat line prepared or "")."""
         t0 = time.perf_counter()
+        self._last_llm = {}
         corr = self._correct(polish)
         self.last_correction = corr
         text = corr.text
-        intent = parse_intent(text)
+        local = parse_intent(text)
+        local_kind = local.kind
+        intent = local
+        route = "rules" if local_kind != "chat" else "chat"
         if intent.kind == "chat" and self.router is not None:
             routed = self._route_intent(text)
             if routed is not None:
                 intent = routed
+                route = "jev"
         self._sources = []
         try:
             reply, line = self._dispatch(intent, text)
@@ -1047,11 +1058,16 @@ class Assistant:
         if reply:
             self._remember(text, reply)
         st = self.state
+        final = intent.kind + (f":{intent.channel}" if intent.channel else "")
+        ms = round((time.perf_counter() - t0) * 1000)
+        log.info("assistant: local=%s route=%s final=%s sources=%s ms=%d",
+                 local_kind, route, final, ", ".join(self._sources[:3]) or "rules", ms)
         fixed = {"fixed": text, "fixes": [f"{f.heard} -> {f.name}" for f in corr.fixes]} if corr.fixes else {}
         self._journal({"heard": polish, **fixed,
-                       "intent": intent.kind + (f":{intent.channel}" if intent.channel else ""),
+                       "intent": final,
+                       "route": route, "llm": dict(self._last_llm),
                        "reply": reply, "line": line, "sources": self._sources,
-                       "ms": round((time.perf_counter() - t0) * 1000),
+                       "ms": ms,
                        "zone": st.zone if st else "", "level": st.level if st else 0})
         self.transcript.appendleft({
             "at": time.time(),
@@ -1059,9 +1075,11 @@ class Assistant:
             "fixed": text if text != polish else "",
             "reply": reply,
             "line": line,
-            "intent": intent.kind + (f":{intent.channel}" if intent.channel else ""),
+            "intent": final,
+            "route": route,
+            "llm": dict(self._last_llm),
             "sources": list(self._sources),
-            "ms": round((time.perf_counter() - t0) * 1000),
+            "ms": ms,
         })
         self._respond(reply, line, status, event="")
         return reply, line
@@ -1439,11 +1457,30 @@ class Assistant:
             return ""
         kw = {"thinking": thinking} if thinking and getattr(self.llm, "supports_thinking", False) else {}
         try:
-            text, _ = self.llm.chat(messages, max_tokens=max_tokens, temperature=temperature,
-                                    timeout=float(self.cfg.get("assistant.llm_timeout_s", 8)), **kw)
+            text, meta = self.llm.chat(messages, max_tokens=max_tokens, temperature=temperature,
+                                       timeout=float(self.cfg.get("assistant.llm_timeout_s", 8)), **kw)
         except Exception as exc:
             log.info("assistant LLM failed: %s", type(exc).__name__)
             return ""
+        self._last_llm = dict(meta) if isinstance(meta, dict) else {}
+        m = self._last_llm
+        provider = m.get("provider") or "?"
+        model = m.get("model") or getattr(self.llm, "model_name", "?") or "?"
+        variant = m.get("variant") or "?"
+        fallback = m.get("fallback", "?")
+        finish = m.get("finish") or ""
+        ms = m.get("ms")
+        if ms is None and m.get("seconds") is not None:
+            try:
+                ms = round(float(m["seconds"]) * 1000)
+            except (TypeError, ValueError):
+                ms = None
+        ms = int(ms or 0)
+        extra = ""
+        if m.get("fallback") and m.get("primary_model"):
+            extra = f" fallback_from={m.get('primary_model')}"
+        log.info("assistant LLM: provider=%s model=%s variant=%s fallback=%s finish=%s%s %d ms",
+                 provider, model, variant, fallback, finish, extra, ms)
         return clean_reply(text, limit or int(self.cfg.get("assistant.max_reply_chars", 240)))
 
     def _long_limit(self) -> int:
