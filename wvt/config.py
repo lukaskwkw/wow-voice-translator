@@ -57,9 +57,19 @@ DEFAULTS: dict[str, Any] = {
         "plan_thinking": "low",
         "max_knowledge_chars": 480,  # answers from the guides and the quest base may be longer than small talk
         "log_file": "logs/assistant.jsonl",  # what you asked and what she answered (privacy.log_assistant)
-        # "gemini": she talks through Google Gemini (key in .env, section "gemini"); translations stay local and
-        # the local model answers whenever Gemini fails
+        # assistant.llm: local | gemini | openai - with gemini she talks through Google Gemini (key in .env, section
+        # "gemini"), with openai through any OpenAI-compatible cloud API (section "assistant.openai"); translations
+        # stay local and the local model answers whenever the cloud fails
         "llm": "local",
+        "openai": {"base_url": "https://opencode.ai/inference/openai/v1", "api_key_env": "OPENCODE_API_KEY",
+                   "model": "deepseek-v4.1-flash", "timeout_s": 20, "max_output_tokens": 4096},
+        "router": "local",  # local | jev - when the rules miss, ask Jev before falling back to chat
+        "jev": {"order": ["openrouter", "opencode"],
+                "base_url": "https://opencode.ai/inference/systemone/v1/systemone",
+                "api_key_env": "OPENCODE_API_KEY", "model": "jev-1.13",
+                "openrouter": {"base_url": "https://openrouter.ai/api/alpha/decisions",
+                               "api_key_env": "OPENROUTER_API_KEY", "model": "typesafe/jev-1.14"},
+                "timeout_s": 2.5, "min_confidence": 0.55},
     },
     "gemini": {
         "model": "gemini-3.8-flash",
@@ -159,6 +169,7 @@ DEFAULTS: dict[str, Any] = {
         "method": "slash",
         "restore_clipboard": False,
         "key_delay_ms": 60,
+        "confirm": False,  # show the line for editing before it is inserted (Enter inserts, Esc cancels)
     },
     "hover": {
         "enabled": True,

@@ -20,7 +20,7 @@ from typing import Callable, Optional, Protocol
 import numpy as np
 
 from . import audio as audio_mod
-from .chat_insert import ChatInserter, build_chat_line, set_clipboard_text
+from .chat_insert import ChatInserter, build_chat_line, sanitize_chat_text, set_clipboard_text
 
 log = logging.getLogger("wvt.pipeline")
 
@@ -43,7 +43,8 @@ class HistoryItem:
 
 class PushToTalkPipeline:
     def __init__(self, cfg, recorder: audio_mod.AudioRecorder, stt, translator, inserter: ChatInserter,
-                 ui: PipelineUI, wow_foreground: Callable[[], bool]):
+                 ui: PipelineUI, wow_foreground: Callable[[], bool],
+                 confirm: Callable[[HistoryItem], None] | None = None):
         self.cfg = cfg
         self.recorder = recorder
         self.stt = stt
@@ -51,6 +52,8 @@ class PushToTalkPipeline:
         self.inserter = inserter
         self.ui = ui
         self.wow_foreground = wow_foreground
+        self.confirm = confirm
+        self._pending_confirm: HistoryItem | None = None
         self.history: deque[HistoryItem] = deque(maxlen=10)
         self._busy = threading.Lock()
         self._recording_channel: Optional[str] = None
@@ -93,6 +96,9 @@ class PushToTalkPipeline:
     def on_press(self, channel: str) -> None:
         if not self.models_ready.is_set():
             self.ui.status("busy", "Modele jeszcze się ładują…", timeout=2.5)
+            return
+        if self._pending_confirm is not None:
+            self.ui.status("busy", "Dokończ edycję tekstu…", timeout=2.0)
             return
         if self._busy.locked():
             self.ui.status("busy", "Poczekaj – poprzednia wypowiedź jeszcze się tłumaczy", timeout=2.0)
@@ -220,6 +226,19 @@ class PushToTalkPipeline:
             # hovering our own message later shows the original Polish instantly
             self.translator.remember(chat_line[len(cmd) + 1:] if cmd else chat_line, polish, "en-pl")
 
+            if insert and self.confirm is not None and bool(self.cfg.get("insert.confirm", False)):
+                timings["release_to_text_ms"] = round((time.perf_counter() - released_at) * 1000)
+                self.last_timings = timings
+                item = HistoryItem(channel, polish, english, chat_line, timings, "pending")
+                self._pending_confirm = item
+                self.ui.status("busy", "Popraw tekst i wciśnij Enter…", ["Esc anuluje"], timeout=0.0)
+                try:
+                    self.confirm(item)
+                except Exception:
+                    self._pending_confirm = None
+                    raise
+                return item
+
             status = "preview"
             if insert:
                 t2 = time.perf_counter()
@@ -255,3 +274,54 @@ class PushToTalkPipeline:
             return None
         finally:
             self._busy.release()
+
+    # ------------------------------------------------------------------ confirm before insert
+    def finish_confirm(self, item: HistoryItem, text: str) -> str | None:
+        if item is not self._pending_confirm:
+            self.ui.status("info", "Nieaktualny tekst – zignorowano", timeout=2.0)
+            return None
+        self._pending_confirm = None
+        max_bytes = int(self.cfg.get("translation.max_chat_chars", 255))
+        edited = sanitize_chat_text(text, max_bytes)
+        if not edited.strip():
+            self.ui.status("info", "Pusty tekst – anulowano", timeout=2.0)
+            return None
+        cmd = self.cfg.get(f"channels.{item.channel}", "")
+        prefix = f"{cmd} " if cmd else ""
+        body = edited[len(prefix):] if prefix and edited.startswith(prefix) else edited
+        item.english = body
+        item.chat_line = edited
+        # hovering the edited line keeps showing the original Polish instantly
+        self.translator.remember(body, item.polish, "en-pl")
+        self._busy.acquire()
+        try:
+            t2 = time.perf_counter()
+            try:
+                status = self.inserter.insert(edited, self.wow_foreground())
+            except Exception as exc:
+                log.exception("insert failed")
+                self.ui.status("error", "Błąd – nic nie zostało wysłane", [str(exc)], timeout=8)
+                return None
+            item.timings["insert_ms"] = round((time.perf_counter() - t2) * 1000)
+            item.status = status
+            if self.cfg.get("privacy.keep_history", True):
+                self.history.appendleft(item)
+            if self.cfg.get("privacy.log_texts", False):
+                log.info("PTT %s | PL=%r | EN=%r | %s", item.channel, item.polish, body, item.timings)
+            else:
+                log.info("PTT %s | %d->%d chars | %s", item.channel, len(item.polish), len(body), item.timings)
+            footer = {"inserted": "W czacie – Enter wysyła, Esc anuluje",
+                      "copied": "Skopiowano do schowka (WoW nie był aktywny) – wklej Ctrl+V"}.get(status, status)
+            self.ui.status("ok", footer, [f"PL: {item.polish}", f"EN: {item.chat_line}",
+                          f"⏱ STT {item.timings.get('stt_ms', 0)} ms · tłumaczenie {item.timings.get('translate_ms', 0)} ms"],
+                          timeout=float(self.cfg.get("hud.show_seconds", 6)))
+            self.ui.result(item)
+            return status
+        finally:
+            self._busy.release()
+
+    def cancel_confirm(self, item: HistoryItem) -> None:
+        if item is not self._pending_confirm:
+            return
+        self._pending_confirm = None
+        self.ui.status("info", "Anulowano", timeout=1.5)

@@ -43,9 +43,17 @@ def rest_seconds(status: int, reason: str = "") -> int:
     return REST_AFTER.get(status, 60)
 
 
-class GeminiError(RuntimeError):
+class CloudError(RuntimeError):
+    """A cloud model failed (network, limit, bad key, empty answer): the local model answers instead."""
+
+    def __init__(self, message: str, status: int = 0):
+        super().__init__(message)
+        self.status = status
+
+
+class GeminiError(CloudError):
     def __init__(self, status: int, reason: str):
-        super().__init__(f"Gemini {status or 'connection'}: {reason}")
+        super().__init__(f"Gemini {status or 'connection'}: {reason}", status)
         self.status = status
 
 
@@ -155,18 +163,17 @@ class GeminiLLM:
 
 
 class FallbackLLM:
-    """Gemini first; the local model when Gemini fails, rests or has no key (one answer is never lost)."""
+    """The cloud model first; the local model when it fails, rests or has no key (one answer is never lost)."""
 
-    def __init__(self, primary: GeminiLLM, fallback):
+    def __init__(self, primary: "GeminiLLM", fallback):
         self.primary = primary
         self.fallback = fallback
         self.fallbacks = 0
+        self.supports_thinking = bool(getattr(primary, "supports_thinking", False))
 
     @property
     def model_name(self) -> str:
         return f"{self.primary.model_name} (zapas: {getattr(self.fallback, 'model_name', 'lokalny')})"
-
-    supports_thinking = True
 
     def chat(self, messages: list[dict], max_tokens: int = 200, temperature: float = 0.0,
              stop: list[str] | None = None, timeout: float | None = None,
@@ -175,7 +182,7 @@ class FallbackLLM:
             try:
                 return self.primary.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
                                          timeout=timeout, thinking=thinking)
-            except GeminiError as exc:
+            except CloudError as exc:
                 log.info("%s - the local model answers this one", exc)
         self.fallbacks += 1
         return self.fallback.chat(messages, max_tokens=max_tokens, temperature=temperature, stop=stop, timeout=timeout)
@@ -303,8 +310,30 @@ def lexicon_embedder(cfg) -> Optional[GeminiEmbedder]:
 
 
 def assistant_llm(cfg, local):
-    """The model the assistant talks with: Gemini (with the local model behind it) or just the local model."""
-    if str(cfg.get("assistant.llm", "local") or "local").lower() != "gemini":
+    """The model the assistant talks with: Gemini or an OpenAI-compatible cloud model (each with the local model
+    behind it) or just the local model."""
+    provider = str(cfg.get("assistant.llm", "local") or "local").lower()
+    if provider == "openai":
+        from .envfile import secret
+
+        o = cfg.get("assistant.openai", {}) or {}
+        env_name = o.get("api_key_env", "OPENCODE_API_KEY")
+        key = secret(env_name)
+        if not key:
+            log.warning("assistant.llm is openai, but there is no %s in .env - the local model answers", env_name)
+            return local
+        try:
+            from .openai_compat import OpenAICompatLLM
+
+            primary = OpenAICompatLLM(key, o.get("model", "deepseek-v4.1-flash"),
+                                      o.get("base_url", "https://opencode.ai/inference/openai/v1"),
+                                      float(o.get("timeout_s", 20)), int(o.get("max_output_tokens", 4096)))
+        except Exception as exc:  # a missing module or a bad config must not stop startup
+            log.warning("the OpenAI-compatible assistant model could not be set up (%s) - the local model answers",
+                        exc)
+            return local
+        return FallbackLLM(primary, local)
+    if provider != "gemini":
         return local
     from .envfile import secret
 

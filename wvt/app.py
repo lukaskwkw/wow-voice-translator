@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -39,6 +40,7 @@ from . import __version__, protocol
 from .audio import AudioRecorder, analyze, dbfs, input_gain, trim_and_normalize
 from .chat_insert import ChatInserter, build_chat_line, set_clipboard_text
 from .config import ROOT, Config
+from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
 from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
@@ -87,6 +89,7 @@ class Bridge(QObject):
     key_captured = Signal(object)
     voice_event = Signal(object)
     voices_enabled = Signal(bool)  # the assistant mutes/unmutes the character voices
+    confirm = Signal(object)
 
 
 class QtPipelineUI:
@@ -314,7 +317,94 @@ class MainWindow(QWidget):
         fl = QFormLayout()
         fl.addRow("Wstawianie:", self.insert_method)
         v.addLayout(fl)
+        self.confirm_edit = QCheckBox("Pokaż tekst do edycji przed wstawieniem (Enter wstawia, Esc anuluje)")
+        self.confirm_edit.setChecked(bool(cfg.get("insert.confirm", False)))
+        v.addWidget(self.confirm_edit)
         lay.addWidget(ptt_box)
+
+        cloud_box = QGroupBox("Asystentka: model w chmurze i router (zmiany po restarcie)")
+        cf = QFormLayout(cloud_box)
+        self.assistant_llm = QComboBox()
+        self.assistant_llm.addItem("Lokalny (Nemotron)", "local")
+        self.assistant_llm.addItem("Gemini (Google AI Studio)", "gemini")
+        self.assistant_llm.addItem("OpenAI-compatible (OpenCode Zen / OpenRouter)", "openai")
+        self.assistant_llm.setCurrentIndex(max(0, self.assistant_llm.findData(cfg.get("assistant.llm", "local"))))
+        cf.addRow("Model odpowiedzi:", self.assistant_llm)
+
+        preset_row = QHBoxLayout()
+        self.cloud_preset = QComboBox()
+        self.cloud_preset.addItem("OpenCode Zen", "zen")
+        self.cloud_preset.addItem("OpenRouter", "openrouter")
+        self.cloud_preset.addItem("Własny", "custom")
+        b_preset = QPushButton("Ustaw adres i zmienną")
+        b_preset.clicked.connect(self._apply_cloud_preset)
+        preset_row.addWidget(self.cloud_preset)
+        preset_row.addWidget(b_preset)
+        preset_row.addStretch(1)
+        cf.addRow("Preset:", preset_row)
+
+        self.openai_base = QLineEdit(str(cfg.get("assistant.openai.base_url") or ""))
+        self.openai_base.setPlaceholderText("https://opencode.ai/inference/openai/v1")
+        cf.addRow("Adres API (base URL):", self.openai_base)
+
+        self.openai_model = QLineEdit(str(cfg.get("assistant.openai.model") or ""))
+        self.openai_model.setPlaceholderText("deepseek-v4.1-flash")
+        cf.addRow("Model:", self.openai_model)
+
+        self.openai_key_env = QLineEdit(str(cfg.get("assistant.openai.api_key_env") or ""))
+        cf.addRow("Zmienna klucza (.env):", self.openai_key_env)
+
+        self.openai_key = QLineEdit()
+        self.openai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openai_key.setPlaceholderText("wpisz klucz, aby zapisać do .env (puste = bez zmian)")
+        cf.addRow("Klucz API:", self.openai_key)
+
+        self.router_mode = QComboBox()
+        self.router_mode.addItem("Tylko reguły lokalne", "local")
+        self.router_mode.addItem("Jev 1.13 (OpenCode Zen)", "jev")
+        self.router_mode.setCurrentIndex(max(0, self.router_mode.findData(cfg.get("assistant.router", "local"))))
+        cf.addRow("Router:", self.router_mode)
+
+        order_val = cfg.get("assistant.jev.order") or "openrouter,opencode"
+        if isinstance(order_val, (list, tuple)):
+            order_val = ",".join(str(x) for x in order_val)
+        self.jev_order = QComboBox()
+        self.jev_order.addItem("OpenRouter 1.14 → OpenCode 1.13", "openrouter,opencode")
+        self.jev_order.addItem("OpenRouter 1.14", "openrouter")
+        self.jev_order.addItem("OpenCode 1.13", "opencode")
+        order_idx = self.jev_order.findData(str(order_val))
+        self.jev_order.setCurrentIndex(order_idx if order_idx >= 0 else 0)
+        cf.addRow("Kolejność Jev:", self.jev_order)
+
+        self.jev_openrouter_model = QLineEdit(str(cfg.get("assistant.jev.openrouter.model") or "typesafe/jev-1.14"))
+        cf.addRow("Model Jev (OpenRouter):", self.jev_openrouter_model)
+
+        self.jev_model = QLineEdit(str(cfg.get("assistant.jev.model") or "jev-1.13"))
+        cf.addRow("Model Jev (OpenCode):", self.jev_model)
+
+        self.jev_confidence = QDoubleSpinBox()
+        self.jev_confidence.setRange(0.0, 1.0)
+        self.jev_confidence.setSingleStep(0.05)
+        self.jev_confidence.setDecimals(2)
+        self.jev_confidence.setValue(float(cfg.get("assistant.jev.min_confidence") or 0.55))
+        cf.addRow("Min. pewność Jev:", self.jev_confidence)
+
+        self.jev_key = QLineEdit()
+        self.jev_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.jev_key.setPlaceholderText("klucz OpenCode Zen (OPENCODE_API_KEY), puste = bez zmian")
+        cf.addRow("Klucz Jev (OpenCode):", self.jev_key)
+
+        self.jev_openrouter_key = QLineEdit()
+        self.jev_openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.jev_openrouter_key.setPlaceholderText("klucz OpenRouter dla Jev (OPENROUTER_API_KEY), puste = bez zmian")
+        cf.addRow("Klucz Jev (OpenRouter):", self.jev_openrouter_key)
+
+        cloud_note = QLabel("Zmiany modelu/routera działają po restarcie aplikacji. "
+                            "Jev: OpenRouter 1.14 → OpenCode 1.13; brak klucza danego providera powoduje jego pominięcie. "
+                            "OpenRouter wymaga OPENROUTER_API_KEY, OpenCode OPENCODE_API_KEY.")
+        cloud_note.setWordWrap(True)
+        cf.addRow(cloud_note)
+        lay.addWidget(cloud_box)
 
         hov_box = QGroupBox("Czat: tłumaczenie po najechaniu myszką (wymaga addonu)")
         hv = QFormLayout(hov_box)
@@ -333,6 +423,22 @@ class MainWindow(QWidget):
         lay.addWidget(save)
         lay.addStretch(1)
         return w
+
+    def _apply_cloud_preset(self) -> None:
+        preset = self.cloud_preset.currentData()
+        if preset == "zen":
+            self.openai_base.setText("https://opencode.ai/inference/openai/v1")
+            self.openai_key_env.setText("OPENCODE_API_KEY")
+            model = self.openai_model.text().strip()
+            if not model or model.startswith("deepseek/"):
+                self.openai_model.setText("deepseek-v4.1-flash")
+        elif preset == "openrouter":
+            self.openai_base.setText("https://openrouter.ai/api/v1")
+            self.openai_key_env.setText("OPENROUTER_API_KEY")
+            model = self.openai_model.text().strip()
+            if not model or model == "deepseek-v4.1-flash":
+                self.openai_model.clear()
+            self.openai_model.setPlaceholderText("np. deepseek/deepseek-v4.1-flash")
 
     def _add_ptt_row(self, key: str, channel: str) -> None:
         r = self.ptt_table.rowCount()
@@ -407,12 +513,46 @@ class MainWindow(QWidget):
         cfg.set("audio.auto_gain", self.auto_gain.isChecked())
         cfg.set("wow.only_when_wow_active", self.only_wow.isChecked())
         cfg.set("insert.method", self.insert_method.currentData())
+        cfg.set("insert.confirm", self.confirm_edit.isChecked())
         cfg.set("hover.enabled", self.hover_enabled.isChecked())
         cfg.set("hover.font_scale", round(self.font_scale.value(), 2))
+        cfg.set("assistant.llm", self.assistant_llm.currentData())
+        base = self.openai_base.text().strip() or "https://opencode.ai/inference/openai/v1"
+        model = self.openai_model.text().strip()
+        if not model:
+            if "openrouter.ai" in base:
+                QMessageBox.warning(self, "Model", "Podaj nazwę modelu OpenRouter (np. deepseek/deepseek-v4.1-flash).")
+                return
+            model = "deepseek-v4.1-flash"
+        cfg.set("assistant.openai.base_url", base)
+        cfg.set("assistant.openai.model", model)
+        cfg.set("assistant.openai.api_key_env", self.openai_key_env.text().strip() or "OPENCODE_API_KEY")
+        cfg.set("assistant.router", self.router_mode.currentData())
+        cfg.set("assistant.jev.model", self.jev_model.text().strip() or "jev-1.13")
+        cfg.set("assistant.jev.min_confidence", round(self.jev_confidence.value(), 2))
+        order = [x for x in self.jev_order.currentData().split(",") if x]
+        cfg.set("assistant.jev.order", order)
+        cfg.set("assistant.jev.openrouter.model", self.jev_openrouter_model.text().strip() or "typesafe/jev-1.14")
+        from .envfile import set_secret
+
+        key = self.openai_key.text().strip()
+        if key:
+            set_secret(self.openai_key_env.text().strip() or "OPENCODE_API_KEY", key)
+            self.openai_key.clear()
+        jev_key = self.jev_key.text().strip()
+        if jev_key:
+            set_secret("OPENCODE_API_KEY", jev_key)
+            self.jev_key.clear()
+        jev_or_key = self.jev_openrouter_key.text().strip()
+        if jev_or_key:
+            set_secret("OPENROUTER_API_KEY", jev_or_key)
+            self.jev_openrouter_key.clear()
         cfg.save()
         self.app.apply_settings()
         self.hint_label.setText(self.app.hotkey_hint())
-        QMessageBox.information(self, "Zapisano", f"Ustawienia zapisane w {cfg.path}")
+        QMessageBox.information(self, "Zapisano",
+                                f"Ustawienia zapisane w {cfg.path}\n\n"
+                                "Zmiany modelu/routera działają po restarcie aplikacji.")
 
     # ------------------------------------------------------------------ diagnostics tab
     def _build_diag_tab(self) -> QWidget:
@@ -480,6 +620,7 @@ class MainWindow(QWidget):
 class TranslatorApp:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        load_env()  # .env first: assistant_llm reads keys from it while the models load
         self.bridge = Bridge()
         from .devsim import SIM_TITLE
 
@@ -501,6 +642,7 @@ class TranslatorApp:
         self.chat_log = ChatLog()  # recent chat from the addon: the assistant's memory and the translator's context
         self.voice_status = "uruchamianie…"
         self.model_state = "ładowanie…"
+        self._confirm_dialog = None
         self.hover_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wvt-hover")
         self._hover_current = None
         self._hover_window: Optional[WowWindow] = None
@@ -529,6 +671,7 @@ class TranslatorApp:
         b.key_captured.connect(self.window.on_key_captured)
         b.voice_event.connect(self.window.voice_tab.add_event)
         b.voices_enabled.connect(lambda on: self.act_voice.setChecked(on))
+        b.confirm.connect(self._on_confirm)
 
         self._level_timer = QTimer()
         self._level_timer.setInterval(100)
@@ -582,7 +725,8 @@ class TranslatorApp:
             self.stt.load()
             self.stt.warmup()
             self.pipeline = PushToTalkPipeline(self.cfg, self.recorder, self.stt, self.translator, self.inserter,
-                                               QtPipelineUI(self.bridge), self.tracker.foreground_is_wow)
+                                               QtPipelineUI(self.bridge), self.tracker.foreground_is_wow,
+                                               confirm=self.bridge.confirm.emit)
             if self.cfg.get("assistant.enabled", True):
                 from .assistant import Assistant
 
@@ -761,6 +905,55 @@ class TranslatorApp:
             self.reader.enabled = bool(self.cfg.get("hover.enabled", True))
         self.act_hover.setChecked(bool(self.cfg.get("hover.enabled", True)))
         self._start_hotkeys()
+
+    # ------------------------------------------------------------------ confirm before insert
+    def _on_confirm(self, item: HistoryItem) -> None:
+        if self._confirm_dialog is not None:
+            if self.pipeline is not None:
+                self.pipeline.cancel_confirm(item)
+            return
+        from .confirm_dialog import ConfirmDialog
+
+        dlg = ConfirmDialog(item, self._insert_confirmed, self._cancel_confirmed,
+                            int(self.cfg.get("translation.max_chat_chars", 255)))
+        self._confirm_dialog = dlg
+        dlg.show()
+
+    def _insert_confirmed(self, item: HistoryItem, text: str) -> None:
+        self._confirm_dialog = None
+        if self.pipeline is None:
+            return
+        win = self.tracker.find(max_age=0)
+        if win is not None:
+            try:
+                from . import winapi
+
+                winapi.user32.SetForegroundWindow(win.hwnd)
+            except Exception:
+                pass
+        QTimer.singleShot(250, lambda: self._start_insert_when_ready(item, text, 20))
+
+    def _start_insert_when_ready(self, item: HistoryItem, text: str, tries: int = 20) -> None:
+        """Insert once WoW has focus (up to ~1 s); otherwise ChatInserter copies the line to the clipboard."""
+        if self.pipeline is None:
+            return
+        if self.tracker.foreground_is_wow() or tries <= 0:
+            threading.Thread(target=self.pipeline.finish_confirm, args=(item, text), daemon=True).start()
+            return
+        QTimer.singleShot(50, lambda: self._start_insert_when_ready(item, text, tries - 1))
+
+    def _cancel_confirmed(self, item: HistoryItem) -> None:
+        self._confirm_dialog = None
+        if self.pipeline is not None:
+            self.pipeline.cancel_confirm(item)
+        win = self.tracker.find(max_age=0)
+        if win is not None:
+            try:
+                from . import winapi
+
+                winapi.user32.SetForegroundWindow(win.hwnd)
+            except Exception:
+                pass
 
     def capture_key(self) -> None:
         if self.hotkeys:

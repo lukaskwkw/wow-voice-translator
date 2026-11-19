@@ -68,6 +68,7 @@ from .advisor import Advice, CLASS_EN, dungeons_for_level, find_item, find_place
 from .bags import BagBook
 from .chat_insert import build_chat_line
 from .config import resolve_path
+from .jev import JevDecision, jev_router
 from .kb.world import Player
 from .lexicon import Correction, Lexicon
 from .loot import advise as loot_advise, item_verdict, pickup_tip
@@ -503,6 +504,53 @@ def _message_intent(verb: str, words: list[str], original: list[str]) -> Intent:
     return Intent("message", spoken=spoken, message=" ".join(body).strip(), channel=channel)
 
 
+# The labels the Jev router may pick, with the descriptions it chooses between (wvt/jev.py)
+INTENT_CRITERIA: dict[str, str] = {
+    "invite": "invite players to the party (zaproś, weź do party, doproś)",
+    "kick": "remove a player from the group",
+    "leader": "give someone group leader",
+    "raid": "convert the party to a raid",
+    "leave": "leave the group",
+    "ready": "ready check",
+    "summary": "summarise chat, trade, guild or whispers",
+    "whispers": "read recent whispers",
+    "who_invite": "who asked for an invite",
+    "gold": "how much gold the player has",
+    "xp": "level or XP progress",
+    "where": "where the player is / which zone",
+    "bags": "bag space",
+    "members": "who is in the group",
+    "plan": "what to do next / a quest route plan",
+    "quest_list": "list the quest log",
+    "quest_nearest": "the nearest quest",
+    "quest_turnin": "quests ready to turn in",
+    "quest_worth": "is a quest worth doing",
+    "find": "find an NPC, trainer, inn, bank, flight master or place",
+    "item": "an item question: what it is, where to buy/farm it, is it better",
+    "loot": "loot, need or greed, what dropped",
+    "reminder": "add or list reminders",
+    "note": "add or list notes",
+    "lang_pl": "switch incoming chat/voice to Polish",
+    "lang_en": "switch back to English",
+    "stop": "stop talking / be quiet",
+    "help": "what the assistant can do",
+    "stats": "session stats / XP per hour / gold per hour",
+    "dungeon_level": "which dungeon is for the player's level",
+    "where_next": "where to go now",
+    "other": "ordinary conversation or a general game-knowledge question",
+}
+# a Jev label -> the intent kind the local rules would have returned (None = chat)
+_LABEL_TO_KIND: dict[str, str] = {
+    "invite": "invite", "kick": "kick", "leader": "lead", "raid": "raid", "leave": "leave", "ready": "ready",
+    "summary": "summary", "whispers": "whispers", "who_invite": "who_invite", "gold": "gold", "xp": "xp",
+    "where": "where", "bags": "bags", "members": "members", "plan": "plan_next", "quest_list": "quest_list",
+    "quest_nearest": "quest_nearest", "quest_turnin": "quest_turnin", "quest_worth": "quest_worth", "find": "find",
+    "item": "item_about", "loot": "loot", "reminder": "reminder_add", "note": "note_add", "lang_pl": "lang_pl",
+    "lang_en": "lang_en", "stop": "stop", "help": "help", "stats": "stats", "dungeon_level": "dungeon_level",
+    "where_next": "where_next",
+}
+
+
 def parse_intent(text: str) -> Intent:
     words, original = _words_with_original(text)
     t = " ".join(words)
@@ -539,6 +587,40 @@ def parse_intent(text: str) -> Intent:
             return Intent("invite_requests")
         return Intent(kind)
     return Intent("chat")
+
+
+def intent_from_label(label: str, text: str, names: tuple[str, ...] = ()) -> Intent:
+    """A Jev label mapped to the intent the local rules would have built (chat when nothing fits)."""
+    label = (label or "").strip().lower()
+    if label in ("", "chat", "other"):
+        return Intent("chat")
+    t = " ".join(_words_with_original(text)[0])
+    if label == "summary":
+        return Intent("summary", channel=_chat_focus(t))
+    if label in ("kick", "leader"):
+        name = match_name(text, list(names)) if names else None
+        if not name:
+            return Intent("chat")
+        return Intent("kick" if label == "kick" else "lead", spoken=name)
+    if label == "invite":
+        name = match_name(text, list(names)) if names else None
+        if name:
+            return Intent("invite_name", spoken=name)
+        if re.search(rf"\b{_GROUP_WORDS}\b", t):
+            return Intent("invite_requests")
+        if any(w in _ONE_PERSON for w in t.split()):
+            return Intent("invite_last")
+        return Intent("invite_requests")
+    if label == "reminder":
+        if re.search(r"\b(jakie|lista|pokaz\w*|przypomnienia|ile)\b", t):
+            return Intent("reminder_list")
+        return Intent("reminder_add")
+    if label == "note":
+        if re.search(r"\b(jakie|lista|pokaz\w*|notatki)\b", t):
+            return Intent("note_list")
+        return Intent("note_add")
+    kind = _LABEL_TO_KIND.get(label)
+    return Intent(kind) if kind else Intent("chat")
 
 
 # --------------------------------------------------------------------------- the assistant
@@ -618,6 +700,9 @@ class Assistant:
         self._sources: list[str] = []  # where the last answer came from (for the journal)
         self.translator = translator
         self.llm = llm
+        self.router = jev_router(cfg)  # Jev decision model when the local rules miss (assistant.router)
+        if self.router is not None:
+            log.info("intent router: Jev %s", self.router.model_name)
         self.inserter = inserter
         self.ui = ui
         self.wow_foreground = wow_foreground
@@ -923,6 +1008,20 @@ class Assistant:
             log.exception("lexicon correction failed")
             return Correction(polish)
 
+    def _route_intent(self, text: str) -> Optional[Intent]:
+        """The Jev router's guess when the local rules returned chat (None: no router or no confident command)."""
+        if self.router is None:
+            return None
+        try:
+            decision: Optional[JevDecision] = self.router.classify(text, INTENT_CRITERIA)
+        except Exception as exc:
+            log.info("Jev router failed (%s) - the local path answers", exc)
+            return None
+        if decision is None or not decision.is_command:
+            return None
+        log.info("Jev: %s (confidence %.2f, %d ms)", decision.label, decision.confidence, decision.ms)
+        return intent_from_label(decision.label, text, tuple(self._known_names()))
+
     def handle(self, polish: str) -> tuple[str, str]:
         """React to one utterance.  Returns (spoken answer, chat line prepared or "")."""
         t0 = time.perf_counter()
@@ -930,6 +1029,10 @@ class Assistant:
         self.last_correction = corr
         text = corr.text
         intent = parse_intent(text)
+        if intent.kind == "chat" and self.router is not None:
+            routed = self._route_intent(text)
+            if routed is not None:
+                intent = routed
         self._sources = []
         try:
             reply, line = self._dispatch(intent, text)

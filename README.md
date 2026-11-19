@@ -96,6 +96,7 @@ Optional:
 | **Enter** | send the text. The app never sends anything by itself: it only pastes into the chat box. |
 
 - **Hover translations.** Hover the mouse over a chat line for a moment and the Polish translation appears above it.
+- **Confirm before inserting (optional).** With **Settings → Push-to-talk → "Pokaż tekst do edycji przed wstawieniem (Enter wstawia, Esc anuluje)"** checked, a small always-on-top box shows the whole chat line (for example `/p hello`) after push-to-talk instead of pasting it at once. **Enter** (or **Wstaw**) inserts it into the chat box, **Esc** (or **Anuluj**) throws it away; you still press Enter in WoW to send, as usual. The box counts the 255-byte limit (`translation.max_chat_chars`) and truncates anything longer when inserted. Iskra's own commands are unaffected: they already land in the chat box and run only on Enter.
 - **Settings.** Keys, microphone and other settings are in the app window. The keys react only while WoW is the active window.
 
 Addon commands in the game:
@@ -160,6 +161,45 @@ Hold **mouse button 5** and say what you want in Polish.
 - Her answers take 2–3 seconds instead of under a second, but they are much better in Polish.
 - If Gemini fails, the local model answers.
 - **Privacy:** the assistant's questions, facts from your game and names from your game (quests, items, people in chat) are then sent to Google. A free key also has a small daily limit. `"lexicon": {"embedder": "local"}` keeps the name vectors on your PC.
+
+**Another cloud model (OpenAI-compatible).** Any OpenAI-compatible chat API can answer her instead of Gemini; translation, voices, speech recognition and the knowledge base stay local.
+
+```json
+"assistant": {"llm": "openai", "openai": {"base_url": "https://opencode.ai/inference/openai/v1", "api_key_env": "OPENCODE_API_KEY", "model": "deepseek-v4.1-flash"}}
+```
+
+- Put `OPENCODE_API_KEY=...` (the name comes from `api_key_env`) in `.env`. Only the assistant sends her questions there.
+- OpenCode Zen's free chat models work only through the OpenCode client; from this app use the paid model (e.g. `deepseek-v4.1-flash`, cents per day), or point `base_url` at OpenRouter with your own model name and key.
+- If the cloud fails or has no key, the local model answers. The `assistant.openai` section also takes `timeout_s` (20) and `max_output_tokens` (4096); these are only the HTTP client's defaults - the assistant still bounds each answer with `assistant.llm_timeout_s` (8 s), and `max_output_tokens` applies only when she does not ask for a shorter answer.
+- These fields (provider, base URL, model, key env, router, Jev model/confidence) are also in Settings → Asystentka; provider/router changes take effect after restarting the app, and a key typed there is written to `.env`.
+
+**Jev router (optional).** When the fast local rules do not recognise what you said, she can ask a Jev decision model which command it is, instead of treating it as ordinary chat. OpenRouter's Jev 1.14 is asked first and OpenCode Zen's Jev 1.13 answers when the first one fails or has no key.
+
+```json
+"assistant": {"router": "jev", "jev": {
+  "order": ["openrouter", "opencode"],
+  "openrouter": {"base_url": "https://openrouter.ai/api/alpha/decisions",
+                 "api_key_env": "OPENROUTER_API_KEY", "model": "typesafe/jev-1.14"},
+  "base_url": "https://opencode.ai/inference/systemone/v1/systemone",
+  "api_key_env": "OPENCODE_API_KEY", "model": "jev-1.13"
+}}
+```
+
+- It runs only when `parse_intent` finds nothing (a `chat` result); a command the rules already know never waits for the network.
+- One request asks two questions: `is_command` (is this a command at all) and a `choice` over the command labels. A low-confidence answer or "other" leaves the normal chat/LLM path untouched, so the router can never break a command. "Not a command" is a valid answer from OpenRouter - the fallback is not asked again in that case.
+- Put `OPENROUTER_API_KEY=...` (from openrouter.ai) and `OPENCODE_API_KEY=...` in `.env`. A provider whose key is missing is skipped silently; with no key at all the router is off and the local rules decide.
+- OpenRouter serves Jev through its Decisions API (`https://openrouter.ai/api/alpha/decisions`), not the chat-completions endpoint; the request body is the same `{model, state, questions}`. Use `~typesafe/jev-latest` as the model to follow the newest version.
+- Price is $0.042 per 1M input tokens and output is free. 1.14 against 1.13 is roughly flat for this routing task (1.14 adds image/box input and a 262k context), so the choice barely changes the answers here.
+- Latency is about 230-350 ms (p50/p95 on OpenRouter) and 350-440 ms on OpenCode Zen.
+- `min_confidence` (0.55) is the threshold below which the answer is ignored; `"router": "local"` (the default) turns the router off.
+- The provider order, both models (`assistant.jev.model`, `assistant.jev.openrouter.model`) and both keys are also in Settings → Asystentka; a missing key skips that provider. Set `"order": ["opencode"]` to keep the old OpenCode-only behaviour and skip OpenRouter.
+- **Privacy:** only the current utterance goes to OpenRouter/TypeSafe or OpenCode/TypeSafe (zero-retention) - no chat log, no quest data, and the key is never logged.
+- Try it from the console (no local models are loaded):
+
+```
+.venv\Scripts\python -m wvt.cli router "weź go doproś do party"
+.venv\Scripts\python -m wvt.cli cloud "Odpowiedz: działa"
+```
 
 **Game knowledge (once).** The knowledge base lets her know WoW Forever: quests, NPCs, dungeons, classes and zones.
 

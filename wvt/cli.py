@@ -6,6 +6,8 @@
     python -m wvt.cli mic --seconds 5 --channel party
     python -m wvt.cli bench [--model models/llm/xxx.gguf] [--no-llm] [--no-stt]
     python -m wvt.cli install-addon [--wow "D:/Games/World of Warcraft"]
+    python -m wvt.cli router "weź go doproś do party" [--json]
+    python -m wvt.cli cloud "Odpowiedz: działa"
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ROOT, Config, resolve_path, wow_root_from
+from .envfile import load_env
 from .logging_setup import setup_logging
 
 
@@ -325,6 +328,69 @@ def cmd_install_addon(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_router(cfg: Config, args) -> int:
+    """What the local rules understood, then what the Jev router makes of the same words (assistant.router: jev)."""
+    from .assistant import INTENT_CRITERIA, intent_from_label, parse_intent
+    from .jev import JevError, jev_router
+
+    text = " ".join(args.text).strip()
+    local = parse_intent(text)
+    print(f"local: {local.kind}" + (f" (spoken: {local.spoken})" if local.spoken else ""))
+    router = jev_router(cfg)
+    if router is None:
+        print('Jev: wyłączony (assistant.router != "jev" albo brak klucza)')
+        return 0
+    print(f"Router: {router.model_name}")
+    try:
+        decision = router.classify(text, INTENT_CRITERIA)
+    except JevError as exc:
+        print(f"Jev: błąd: {exc}")
+        return 1
+    finally:
+        router.close()
+    if decision is None:
+        print("Jev: brak pewnej komendy")
+        return 0
+    print(f"Jev: {decision.label} confidence={decision.confidence:.2f} {decision.ms} ms "
+          f"is_command={decision.is_command} provider={decision.provider}")
+    mapped = intent_from_label(decision.label, text)
+    print(f"mapped: {mapped.kind}")
+    if args.json:
+        print(json.dumps({"label": decision.label, "confidence": decision.confidence,
+                          "probabilities": decision.probabilities, "mapped": mapped.kind,
+                          "provider": decision.provider}, ensure_ascii=False))
+    return 0
+
+
+def cmd_cloud(cfg: Config, args) -> int:
+    """One question to the OpenAI-compatible cloud model (assistant.openai) - no local models are loaded."""
+    from .envfile import secret
+    from .gemini import CloudError
+    from .openai_compat import OpenAICompatLLM
+
+    text = " ".join(args.text).strip()
+    o = cfg.get("assistant.openai", {}) or {}
+    env_name = o.get("api_key_env", "OPENCODE_API_KEY")
+    key = secret(env_name)
+    if not key:
+        print(f"Brak klucza {env_name} w .env")
+        return 1
+    client = OpenAICompatLLM(key, o.get("model", "deepseek-v4.1-flash"),
+                             o.get("base_url", "https://opencode.ai/inference/openai/v1"),
+                             float(o.get("timeout_s", 20)), int(o.get("max_output_tokens", 4096)))
+    try:
+        prompt = "Odpowiedz jednym krótkim zdaniem po polsku: " + text
+        answer, meta = client.chat([{"role": "user", "content": prompt}], max_tokens=200)
+        print(answer)
+        print(meta)
+    except CloudError as exc:
+        print(f"Chmura: błąd: {exc}")
+        return 1
+    finally:
+        client.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m wvt.cli")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -344,6 +410,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-stt", action="store_true")
     p = sub.add_parser("install-addon")
     p.add_argument("--wow", help="folder World of Warcraft (ten z _forever_), gdy nie wykryje się sam")
+    p = sub.add_parser("router")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("cloud")
+    p.add_argument("text", nargs="+")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -351,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
 
+    load_env()  # .env before anything reads a secret (Config.load itself needs no key)
     cfg = Config.load()
     setup_logging(cfg, console=True)
     return {
@@ -360,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         "mic": cmd_mic,
         "bench": cmd_bench,
         "install-addon": cmd_install_addon,
+        "router": cmd_router,
+        "cloud": cmd_cloud,
     }[args.cmd](cfg, args)
 
 

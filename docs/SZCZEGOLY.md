@@ -106,13 +106,17 @@ Po załadowaniu na GPU aplikacja sprawdza, że sesje onnxruntime naprawdę mają
 
 **Wspólny STT dla innych programów** (`wvt/stt_server.py`, `stt.server_port`, domyślnie 39283). Usługa mowy Gothica (`gothic2_openDialog/voicechat`) pyta `http://127.0.0.1:39283/health` i gdy dostanie `ok`, wysyła nagrania tutaj zamiast ładować drugiego Whispera (dwie kopie to ~5 GB VRAM). `GET /health` → `{"ok", "model", "device"}`, przy czym `ok` jest prawdą dopiero po załadowaniu. `POST /stt` z WAV PCM 16-bit mono 16 kHz (przyciętym i wzmocnionym przez wołającego, bez naszego progu ciszy) → `{"text", "ms"}`, błędy 4xx/5xx `{"error"}`. Usługa słucha tylko na 127.0.0.1 i przyjmuje tylko zapytania z nagłówkiem Host 127.0.0.1/localhost (ochrona przed DNS rebinding). Port jest na wyłączność (`SO_EXCLUSIVEADDRUSE`): domyślne `SO_REUSEADDR` serwera HTTP Pythona pozwalało na Windows zająć ten sam port drugiemu programowi, co wyłapał test. Rozpoznania idą po jednym, pod tym samym zamkiem co push-to-talk, więc wołanie z Gothica zajmuje klawisze WoW najwyżej na jedną kwestię (~0,2 s). Nic o nagraniach ani tekście nie trafia do logu. Opcjonalne `?prompt=<tekst w URL-encoding>` przekazuje Whisperowi nazwy, które ma pisać poprawnie (np. imiona postaci, z którymi gracz rozmawia), najważniejsze na końcu, z tą samą ochroną przed zmyślaniem co w aplikacji (niżej).
 
-**Asystentka na Gemini** (`assistant.llm: "gemini"`, `wvt/gemini.py`, klucz `GOOGLE_AI_API_KEY` w `.env`). Tylko Iskra rozmawia przez Google Gemini 3.8 Flash (`gemini-3.8-flash`, stabilny od 2.09.2026), a tłumaczenia czatu, głosy i budowanie bazy zostają na lokalnym modelu. Zapytania idą przez REST `generateContent` bez SDK:
+**Asystentka na Gemini** (`assistant.llm: "gemini"`, `wvt/gemini.py`, klucz `GOOGLE_AI_API_KEY` w `.env`; inny wariant to `assistant.llm: "openai"`, opisany niżej). Tylko Iskra rozmawia przez Google Gemini 3.8 Flash (`gemini-3.8-flash`, stabilny od 2.09.2026), a tłumaczenia czatu, głosy i budowanie bazy zostają na lokalnym modelu. Zapytania idą przez REST `generateContent` bez SDK:
 - myślenie na `low`, najniższym poziomie, bo 3.8 Flash nie pozwala go wyłączyć;
 - bez temperatury, bo Gemini 3.6+ ją ignoruje i ma zacząć zwracać błąd 400;
 - duży `maxOutputTokens`, bo limit obejmuje też tokeny myślenia;
 - klucz w nagłówku `x-goog-api-key`, nigdy w adresie i nigdy w logu.
 
 Pomiar 9.11 (prompty Iskry): rozmowa 3,1 s, odpowiedź z bazy 2,8 s, streszczenie czatu 2,2 s, 0 tokenów myślenia. Model lokalny odpowiada w 0,3–0,8 s, ale wyraźnie słabiej. Każdy błąd Gemini (limit, brak sieci, zły klucz, pusta odpowiedź) kosztuje tylko tę jedną odpowiedź, którą wtedy daje lokalny model. Po limicie (429) Gemini odpoczywa minutę, po wyczerpaniu dziennego limitu godzinę, a po złym kluczu, braku środków albo braku dostępu 30 minut. Cena (płatny klucz, do 31.12.2026): 0,75 USD za 1 mln tokenów wejścia i 3,75 USD za 1 mln wyjścia. Darmowy klucz ma podobno ok. 20 zapytań dziennie, a Google może używać tych danych do ulepszania swoich produktów.
+
+**Asystentka na innym modelu w chmurze** (`assistant.llm: "openai"`, `wvt/openai_compat.py`). Zamiast Gemini Iskra może rozmawiać przez dowolne API zgodne z OpenAI (jedno `POST` na `base_url` + `/chat/completions`, klucz w nagłówku `Authorization: Bearer`, nigdy w adresie ani w logu). Domyślnie to OpenCode (`https://opencode.ai/inference/openai/v1`, model `deepseek-v4.1-flash`, klucz `OPENCODE_API_KEY` w `.env`); `base_url`, `model` i `api_key_env` są w `assistant.openai`. Darmowe modele czatu OpenCode Zen działają tylko przez klienta OpenCode, więc z tej aplikacji trzeba użyć płatnego modelu (koszt rzędu centów dziennie) albo wskazać w `base_url` OpenRouter. Przerwy po błędzie są te same co przy Gemini (`rest_seconds`, 429 = minuta), a każdy błąd kosztuje tylko tę jedną odpowiedź: wtedy mówi lokalny model.
+
+**Router Jev** (`assistant.router: "jev"`, `wvt/jev.py`). Gdy reguły lokalne nie rozpoznają wypowiedzi i zwracają `chat`, Iskra może najpierw zapytać model decyzyjny Jev 1.13 System One, czy to w ogóle polecenie (`is_command`, odpowiedź `noul`) i które (`choice` po etykietach komend, m.in. `invite`, `kick`, `leader`, `summary`, `plan`, `quest_list`, `item`, `reminder`, `other`). Jedno `POST` na `/systemone` z samą bieżącą wypowiedzią (bez logu czatu i danych o questach), klucz w nagłówku `Authorization: Bearer` (`OPENCODE_API_KEY` z `.env`), nigdy w adresie ani w logu. Odpowiedź poniżej `min_confidence` (0,55), etykieta `other` albo jakikolwiek błąd/timeout zostawiają normalną ścieżkę czatu/LLM, więc router nigdy nie psuje komendy rozpoznanej lokalnie. Czas odpowiedzi to ~350–440 ms; `jev-1.13` kosztuje 0,042 USD za 1 mln tokenów wejścia (wyjście darmowe), a `jev-1.13-free` to darmowy model na ograniczony czas. Domyślnie `router: "local"` wyłącza router. Do prób z konsoli (bez ładowania lokalnych modeli): `.venv\Scripts\python -m wvt.cli router "weź go doproś do party"` i `.venv\Scripts\python -m wvt.cli cloud "Odpowiedz: działa"`.
 
 **VRAM łącznie**: pulpit/przeglądarka ~4,1 GB + LLM 3,8 GB + Parakeet na GPU 3,7 GB ≈ 11,6 GB; WoW Forever zużywał w teście ok. 2,7 GB → ~14,3 z 16 GB. Dlatego `stt.device: "auto"` stawia STT na GPU tylko wtedy, gdy po załadowaniu LLM zostaje ≥ 6,3 GB wolnej pamięci (3,8 GB na STT + 2,5 GB zapasu dla gry); inaczej używa CPU int8 (+80 ms, 0 VRAM).
 
@@ -329,6 +333,7 @@ App:  zrzut obu siatek → filtry (kanał, własne, powtórki, zasięg, limit) �
 | `wow.only_when_wow_active` | `true` | hotkeye działają (i są połykane) tylko gdy WoW jest aktywny |
 | `insert.method` | `slash` | `slash` („/” + wklej), `enter` (Enter + wklej), `clipboard` (tylko kopiuj) |
 | `insert.key_delay_ms` | `60` | odstęp między klawiszami przy wklejaniu; zwiększ (np. 200) przy niskim FPS |
+| `insert.confirm` | `false` | po push‑to‑talk pokaż małe okienko zawsze na wierzchu z całą linią czatu (np. `/p hello`); Enter/„Wstaw” wkleja, Esc/„Anuluj” odrzuca; licznik 255 bajtów (`translation.max_chat_chars`), nadmiar obcinany przy wstawianiu |
 | `audio.device` | `null` | nazwa/indeks mikrofonu, `null` = domyślny w Windows |
 | `audio.silence_rms_threshold` | `0.006` | poniżej = cisza (nic nie jest tłumaczone) |
 | `audio.mic_always_open` | `true` | strumień otwarty cały czas → 0,3 s „pre‑roll”, pierwsza sylaba nie ginie |
@@ -348,7 +353,16 @@ App:  zrzut obu siatek → filtry (kanał, własne, powtórki, zasięg, limit) �
 | `lexicon.translate_names` | `20` | ile nazw dostaje tłumacz w poleceniu (`0` = żadnych) |
 | `lexicon.nearby_yards`, `lexicon.nearby_max` | `300`, `30` | NPC i potwory w pobliżu brane do nazw |
 | `lexicon.user_file` | `data/slownik.txt` | Twoje słowa, jedno w wierszu („Nazwa = co to jest”) |
-| `assistant.llm` | `local` | `gemini` – Iskra rozmawia przez Google Gemini (klucz `GOOGLE_AI_API_KEY` w `.env`), reszta zostaje lokalnie |
+| `assistant.llm` | `local` | `local` / `gemini` / `openai` – przez kogo rozmawia Iskra: Google Gemini (klucz `GOOGLE_AI_API_KEY` w `.env`) albo dowolne API zgodne z OpenAI (`assistant.openai`), reszta zostaje lokalnie |
+| `assistant.openai.base_url` | `https://opencode.ai/inference/openai/v1` | adres API zgodnego z OpenAI (dopisywane jest `/chat/completions`; OpenRouter też zadziała) |
+| `assistant.openai.api_key_env`, `assistant.openai.model` | `OPENCODE_API_KEY`, `deepseek-v4.1-flash` | nazwa klucza w `.env` i model; `assistant.openai.timeout_s` 20 (domyślny timeout klienta HTTP; asystentka i tak używa `assistant.llm_timeout_s`), `assistant.openai.max_output_tokens` 4096 (tylko gdy pytanie nie prosi o krótszą odpowiedź) |
+| `assistant.router` | `local` | `local` / `jev` – gdy reguły lokalne zwrócą `chat`, zapytaj Jev, czy to polecenie i które (`wvt/jev.py`); `local` wyłącza router |
+| `assistant.jev.order` | `["openrouter", "opencode"]` | kolejność dostawców Jev: najpierw OpenRouter (Jev 1.14), potem OpenCode Zen (Jev 1.13); dostawca bez klucza w `.env` jest pomijany, a `["opencode"]` wyłącza OpenRouter |
+| `assistant.jev.openrouter.base_url` | `https://openrouter.ai/api/alpha/decisions` | adres OpenRouter – Decisions API (nie chat completions); pełny adres jest używany bez zmian |
+| `assistant.jev.openrouter.api_key_env` | `OPENROUTER_API_KEY` | nazwa klucza OpenRouter w `.env` |
+| `assistant.jev.openrouter.model` | `typesafe/jev-1.14` | model OpenRouter (`~typesafe/jev-latest` podąża za najnowszą wersją; 1.13 też jest serwowany) |
+| `assistant.jev.base_url` | `https://opencode.ai/inference/systemone/v1/systemone` | adres OpenCode Zen (dopisywane jest `/systemone`, gdy go brak) |
+| `assistant.jev.api_key_env`, `assistant.jev.model` | `OPENCODE_API_KEY`, `jev-1.13` | nazwa klucza w `.env` i model OpenCode (starsze pola = dostawca `opencode`; `jev-1.13-free` to darmowy model na ograniczony czas); `assistant.jev.timeout_s` 2,5 i `assistant.jev.min_confidence` 0,55 |
 | `gemini.model`, `gemini.thinking_level` | `gemini-3.8-flash`, `low` | model i poziom myślenia (`low` / `medium` / `high`); `gemini.timeout_s` 15 |
 | `llm.model_path` | Nemotron 3.5 Bolt E4B | plik GGUF; `llm.mode: "external"` + `llm.base_url` = własny serwer OpenAI‑compatible |
 | `hover.enabled` | `true` | tłumaczenie po najechaniu |
@@ -367,6 +381,7 @@ App:  zrzut obu siatek → filtry (kanał, własne, powtórki, zasięg, limit) �
 ## Bezpieczeństwo konta i prywatność
 
 - Nic nie jest wysyłane na czat bez Twojego Enter. Aplikacja symuluje tylko „/” i Ctrl+V – i tylko po Twoim push‑to‑talk, gdy WoW jest aktywny (inaczej tekst ląduje w schowku).
+- Opcjonalne okienko potwierdzenia (`insert.confirm`) pozwala zobaczyć i poprawić całą linię, zanim trafi do pola czatu; nic nie jest wysyłane bez Enter.
 - Brak odczytu/zapisu pamięci WoW, brak DLL injection, brak modyfikacji ruchu sieciowego. Addon używa wyłącznie publicznego API UI i nie wykonuje żadnych chronionych akcji.
 - Nagrania są tylko w RAM, nigdy na dysku. Logi domyślnie bez treści rozmów.
 - Serwer LLM nasłuchuje wyłącznie na `127.0.0.1`.
