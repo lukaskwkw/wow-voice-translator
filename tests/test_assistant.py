@@ -1045,7 +1045,8 @@ def test_gear_next_suggests_upgrade_rewards_and_skips_bad_ones():
     a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
     a.quests.updated_at = time.time()
     a.quests.done_known = False
-    a._worn_item_level = lambda: (10.0, 5)
+    a._worn_pieces = lambda: [("Item A", 10, 1), ("Item B", 10, 1), ("Item C", 10, 1),
+                              ("Item D", 10, 1), ("Item E", 10, 1)]
     for i, qid in enumerate((501, 502, 503, 504), start=1):
         q = FakeGearWorld.quests[qid]
         a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
@@ -1055,7 +1056,8 @@ def test_gear_next_suggests_upgrade_rewards_and_skips_bad_ones():
     assert "The Deadmines" in reply and "Soldier's Sword" in reply and "poz. 18 (wym. 10), +8" in reply
     assert "Signet for a Friend" in reply and "Signet Ring" in reply  # misc armor fits every class
     assert "Wrong Armor" not in reply and "Low Reward" not in reply
-    assert "Średni item level noszonych części: 10.0 (5 części)." in reply
+    assert ("Znam 5 noszonych części (item level): Item A (poz. 10), Item B (poz. 10), Item C (poz. 10), "
+            "Item D (poz. 10), Item E (poz. 10). Próg: 10.0 – średnia item levelu tych części.") in reply
     assert a.transcript[0]["intent"] == "gear_next"
 
 
@@ -1069,14 +1071,45 @@ def test_gear_next_labels_a_small_sample_or_no_worn_gear_honestly():
     for i, qid in enumerate((501, 502, 503, 504), start=1):
         q = FakeGearWorld.quests[qid]
         a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
-    a._worn_item_level = lambda: (17.0, 1)
+    a._worn_pieces = lambda: [("Stary Miecz", 17, 7)]
     reply, _line = a.handle("gdzie iść po upgrade itemów?")
-    assert ("Znam tylko 1 części noszonego sprzętu; średni item level 17.0 to mała próbka "
-            "i może być niemiarodajny.") in reply
+    assert ("Znam 1 noszoną część (item level): Stary Miecz (poz. 17). Próg: 17.0 – średnia z tej próbki; "
+            "mała próbka, może być niemiarodajna.") in reply
     assert "poz. 18 (wym. 10), +1" in reply
-    a._worn_item_level = lambda: (17.0, 0)
+    a._worn_pieces = lambda: []
     reply, _line = a.handle("gdzie iść po upgrade itemów?")
-    assert "Nie widzę noszonego sprzętu; liczę od poziomu 17." in reply
+    assert ("Nie widzę noszonego sprzętu; porównuję z Twoim poziomem (15), "
+            "co jest tylko zgrubnym przybliżeniem.") in reply
+
+
+def test_gear_next_shows_the_questiedb_required_level_caveat_only_when_data_is_missing():
+    class ZeroRlGearWorld(FakeGearWorld):
+        def __init__(self):
+            self.all_items = dict(FakeGearWorld.all_items)
+            self.all_items[900] = {"n": "Soldier's Sword", "c": 2, "sc": 7, "il": 18, "rl": 0}
+
+    def gear_assistant(world):
+        a, ins, ui, voice, llm = make_assistant()
+        a.world_getter = lambda: world
+        a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+        a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+        a.quests.updated_at = time.time()
+        a.quests.done_known = False
+        a._worn_pieces = lambda: [("Item A", 10, 1)]
+        for i, qid in enumerate((501, 502, 503, 504), start=1):
+            q = FakeGearWorld.quests[qid]
+            a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
+        return a
+
+    caveat = "Wymaganego poziomu QuestieDB często nie zna – brak „wym.” to brak danych, nie brak wymogu."
+    a = gear_assistant(ZeroRlGearWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert caveat in reply
+    assert "(wym. 0)" not in reply
+
+    a = gear_assistant(FakeGearWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert caveat not in reply
 
 
 def test_gear_help_can_be_turned_off():
@@ -1120,7 +1153,8 @@ def _world_gear_assistant():
     a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
     a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
     a.quests.done_known = True
-    a._worn_item_level = lambda: (10.0, 5)
+    a._worn_pieces = lambda: [("Item A", 10, 1), ("Item B", 10, 1), ("Item C", 10, 1),
+                              ("Item D", 10, 1), ("Item E", 10, 1)]
     return a, llm
 
 
@@ -1133,7 +1167,8 @@ def test_gear_next_world_lists_current_zone_first_then_other_maps():
     assert "Redridge Run" in reply and "Signet Ring" in reply and "inna mapa" in reply
     assert reply.index("The Deadmines") < reply.index("Redridge Run")  # nearest / same map first
     assert "Wrong Armor" not in reply and "Too High" not in reply and "Low Reward" not in reply
-    assert "Średni item level noszonych części: 10.0 (5 części)." in reply
+    assert ("Znam 5 noszonych części (item level): Item A (poz. 10), Item B (poz. 10), Item C (poz. 10), "
+            "Item D (poz. 10), Item E (poz. 10). Próg: 10.0 – średnia item levelu tych części.") in reply
     assert a._sources == ["gear rewards world: 2"]
 
 
@@ -1142,6 +1177,65 @@ def test_gear_next_world_is_disabled_with_gear_help_off():
     a.cfg["assistant.gear_help"] = False
     reply, line = a.handle("gdzie na świecie po upgrade itemów")
     assert line == "" and llm.calls == []
+    assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
+
+
+def test_worn_pieces_reads_real_loot_data_and_dedupes():
+    a, *_ = make_assistant()
+    a._items = {
+        "candidate": (time.time(), P.LootItem(name="Candidate", item_level=18, equipped=[
+            P.WornItem(name="Chest", item_level=20, subclass_id=4),
+            P.WornItem(name="Ring", item_level=14, subclass_id=0),
+        ])),
+        "second": (time.time(), P.LootItem(name="Second", item_level=16, equipped=[
+            P.WornItem(name="Chest", item_level=20, subclass_id=4),
+            P.WornItem(name="Zero", item_level=0, subclass_id=1),
+        ])),
+    }
+    assert a._worn_item_level() == (17.0, 2)
+    assert a._worn_pieces() == [("Chest", 20, 4), ("Ring", 14, 0)]
+
+
+def test_gear_debug_dumps_worn_pieces_rewards_and_verdicts():
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: FakeGearWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    a._worn_pieces = lambda: [("Item A", 10, 1), ("Item B", 10, 1)]
+    for i, qid in enumerate((501, 503, 504), start=1):
+        q = FakeGearWorld.quests[qid]
+        a.on_packet(quest_pkt(sync=1, index=i, total=3, quest_id=qid, title=q["n"], zone="Westfall"))
+    reply, line = a.handle("{gear_debug}")
+    assert line == "" and llm.calls == []
+    assert "Noszone części" in reply
+    assert "Item A (poz. 10)" in reply
+    assert "poz. " in reply
+    assert "bierę" in reply
+    assert "za nisko" in reply or "zła klasa" in reply
+    assert "Uwaga: QuestieDB" in reply
+    assert a.transcript[-1]["intent"] == "directives:gear_debug"
+
+
+def test_gear_debug_directive_parses_but_plain_debug_does_not():
+    a, *_ = make_assistant()
+    a.world_getter = lambda: FakeGearWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    a._worn_pieces = lambda: []
+    a.handle("{gear_debug}")
+    assert a.transcript[0]["intent"].endswith("gear_debug")
+    assert parse_intent("debug").kind != "gear_debug"
+
+
+def test_gear_debug_is_disabled_with_gear_help_off():
+    a, *_ = make_assistant()
+    a.cfg["assistant.gear_help"] = False
+    reply, line = a.handle("{gear_debug}")
+    assert line == ""
     assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
 
 
