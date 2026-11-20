@@ -39,6 +39,10 @@ class BracketCompleter(QObject):
         self._completer.setCompletionRole(Qt.ItemDataRole.UserRole)
         self._completer.activated.connect(self._insert)
 
+        self._popup = self._completer.popup()
+        if self._popup is not None:
+            self._popup.installEventFilter(self)
+
         edit.installEventFilter(self)
         edit.textEdited.connect(self._update)
         edit.cursorPositionChanged.connect(self._update)
@@ -119,7 +123,12 @@ class BracketCompleter(QObject):
 
     # ------------------------------------------------------------------ keyboard
     def eventFilter(self, obj, event):  # noqa: N802 - Qt override
-        if obj is not self.edit or event.type() != QEvent.Type.KeyPress:
+        if event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(obj, event)
+        popup = self._completer.popup()
+        if obj is popup and popup is not None:
+            return self._popup_key(event)
+        if obj is not self.edit:
             return super().eventFilter(obj, event)
         if not self._is_enabled():
             self.hide_popup()
@@ -127,7 +136,6 @@ class BracketCompleter(QObject):
         if not self.popup_visible():
             return super().eventFilter(obj, event)
         key = event.key()
-        popup = self._completer.popup()
         rows = self._model.rowCount()
 
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
@@ -160,6 +168,31 @@ class BracketCompleter(QObject):
             return True
 
         return super().eventFilter(obj, event)
+
+    def _popup_key(self, event):
+        """Keys delivered to the popup: Tab/Enter insert here, arrows stay with the popup."""
+        if not self._is_enabled():
+            self.hide_popup()
+            return super().eventFilter(self._popup, event)
+        key = event.key()
+        popup = self._completer.popup()
+        rows = self._model.rowCount()
+
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+            index = popup.currentIndex() if popup is not None else QModelIndex()
+            if not index.isValid():
+                index = self._model.index(0, 0)
+            if rows <= 0:
+                self.hide_popup()
+                return True
+            self._insert(index)
+            return True
+
+        if key == Qt.Key.Key_Escape:
+            self.hide_popup()
+            return True
+
+        return super().eventFilter(self._popup, event)
 
     # ------------------------------------------------------------------ insertion
     def _insert(self, chosen) -> None:

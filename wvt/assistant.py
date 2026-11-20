@@ -452,6 +452,17 @@ _RULES: tuple[tuple[str, str], ...] = (
     # quests (after gold / xp / bags, which also start with "ile")
     ("quest_turnin", r"\b(co|ktore|ktory|jakie|czy)\b.*\b(oddac|oddania|oddam|skonczon\w*|ukonczon\w*|gotow\w*"
                      r"|zrobion\w*)\b|\bgdzie\b.*\boddac\b"),
+    ("quest_available",
+     r"\b(jaki|jakie|ktory|ktore|co|czy)\b"
+     r"(?!.*\b(?:tego|ten|tej|te|ta) (?:quest|quesc)\w*)"
+     r".*\b(quest\w*|quesc\w*|zadan\w*|misj\w*)\b"
+     r"(?!.*\bw (tym|tego) (?:quest|quesc)\w*)"
+     r".*\b(moge|mozna|warto|dostepn\w*|wziac|wziasc|zrobic|zaczac)\b"
+     r"|\bco (jest|mam) do wziecia\b(?!.*\bw (tym|tego) (?:quest|quesc)\w*)"
+     r"|\bquesty do wziecia\b"
+     r"|\bco moge (wziac|zrobic) (w tej strefie|na tej mapie|tutaj)\b"
+     r"|\b(dostepne|dostepnych) (questy|questow|zadania)\b"
+     r"|\bquesty (w tej strefie|na tej mapie|tutaj)\b"),
     ("quest_nearest", r"\b(najblizsz\w*|najblizej)\b"),
     ("quest_list", r"\b(jakie|ile)\b.*\b(quest\w*|quesc\w*|kwest\w*|kwesc\w*|zadan\w*|dziennik\w*|misj\w*)\b"
                    r"|\bco (mam|jest) w (dzienniku|questach)\b|\b(lista|liste) (questow|zadan)\b"
@@ -1362,6 +1373,8 @@ class Assistant:
         if k == "quest_where" and t is not None and t.kind != "quest" and t.advice is not None \
                 and self._back(polish) and not self.last_correction.found:
             return self._advice(t.advice)  # "a gdzie to jest?" right after an item or a place
+        if k == "quest_available":
+            return self._available_quests(polish)
         if k.startswith("quest_"):
             return self._quest_answer(k, polish)
         answer = self._knowledge(polish)
@@ -1728,6 +1741,59 @@ class Assistant:
         if not quests:
             return "Twój dziennik zadań jest pusty. Czas złapać jakiś quest.", ""
         return self._quest_text(kind, polish, quests)
+
+    def _available_quests(self, polish: str) -> tuple[str, str]:
+        """Quests you can pick up in the zone you are in now (QuestieDB), nearest starter first."""
+        world = self.world_getter()
+        if world is None:
+            return "Nie mam jeszcze bazy questów. Zbuduj ją: python -m wvt.kb.build.", ""
+        player = self._player()
+        if not player.level:
+            return "Nie znam jeszcze twojego poziomu – daj mi chwilę po wejściu do gry.", ""
+        if not player.done_known:
+            return ("Nie znam jeszcze twoich ukończonych questów, więc nie podpowiem, co jest dostępne. "
+                    "Daj mi chwilę po /reload."), ""
+        st = self.state
+        zone = (st.zone or st.subzone) if st is not None else ""
+        area = world.find_area(zone) if zone else 0
+        pos = self.quests.pos
+        if not area and pos is not None and getattr(pos, "map_id", 0):
+            area = world.zone_of_map(pos.map_id)
+        if not area:
+            return "Nie wiem, w jakiej jesteś strefie – wejdź do gry na chwilę i zapytaj jeszcze raz.", ""
+        zone_name = world.names.get(area, "") or "tej strefie"
+        active = {q.quest_id for q in self.quests.quests()} if self.quests.known else set()
+        found: list[tuple[float, str, int, str]] = []
+        for qid, q in world.quests.items():
+            lvl = q.get("lvl") or q.get("min") or 0
+            if lvl and not (player.level - 4 <= lvl <= player.level + 2):
+                continue
+            if int(q.get("zone") or 0) != area:
+                continue
+            if not world.available(q, qid, player, active):
+                continue
+            spot = world.starter_spot(qid, pos, player.faction) if pos is not None else None
+            distance = spot.distance if spot is not None and spot.distance is not None else 1e9
+            giver = spot.name if spot is not None else ""
+            name = q.get("n") or ""
+            if name:
+                found.append((distance, name, lvl, giver))
+        if not found:
+            return f"W {zone_name} nie widzę questów do wzięcia na twój poziom.", ""
+        found.sort(key=lambda x: x[0])
+        parts = []
+        for distance, name, lvl, giver in found[:6]:
+            bit = f"{name} (poz. {lvl}"
+            if giver:
+                bit += f", u {giver}"
+            if distance < 1e9:
+                bit += f", ~{int(round(distance))} yd"
+            parts.append(bit + ")")
+        reply = f"W {zone_name} możesz wziąć: " + "; ".join(parts) + "."
+        if len(found) > 6:
+            reply += f" I jeszcze {len(found) - 6}."
+        self._sources = [f"QuestieDB: {len(found)} available in {zone_name or '?'}"]
+        return reply, ""
 
     def _quest_text(self, kind: str, polish: str, quests: list) -> tuple[str, str]:
         book = self.quests

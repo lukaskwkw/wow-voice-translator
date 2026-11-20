@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -366,6 +367,69 @@ def test_without_a_quest_log_she_says_so_and_a_new_log_replaces_the_old_one():
     assert [q.title for q in a.quests.quests()] == ["Kept One", "New One"]
     a.on_packet(quest_pkt(sync=3, index=0, total=0))
     assert a.handle("jakie mam questy?")[0].startswith("Twój dziennik zadań jest pusty")
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("jakie questy mogę wziąć w tej strefie?", "quest_available"),
+    ("co jest do wzięcia?", "quest_available"),
+    ("jakie questy mogę oddać?", "quest_turnin"),
+    ("jakie questy mam?", "quest_list"),
+    ("co mam do zrobienia?", "quest_list"),
+])
+def test_available_quest_questions_become_the_right_intent(text, kind):
+    assert parse_intent(text).kind == kind
+
+
+def test_a_question_about_this_quest_is_not_about_available_quests():
+    assert parse_intent("jakie questy mogę zrobić w tym queście?").kind != "quest_available"
+    assert parse_intent("czy mogę zrobić tego questa?").kind != "quest_available"
+    assert parse_intent("czy mogę zrobić ten quest?").kind != "quest_available"
+
+
+class FakeAvailableWorld:
+    names = {10: "Westfall", 20: "Redridge Mountains"}
+    quests = {
+        501: {"n": "The Deadmines", "lvl": 15, "zone": 10},
+        502: {"n": "Goldtooth", "lvl": 15, "zone": 10},
+        503: {"n": "Hidden Quest", "lvl": 15, "zone": 10},
+        504: {"n": "Other Zone Quest", "lvl": 15, "zone": 20},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def map_of(self, area):
+        return 10 if area == 10 else 0
+
+    def available(self, q, qid, player, active):
+        return qid != 503
+
+    def starter_spot(self, qid, pos, faction):
+        if qid == 501:
+            return SimpleNamespace(name="Gryan Stoutmantle", distance=500.0)
+        if qid == 502:
+            return SimpleNamespace(name="Miner Johnson", distance=50.0)
+        return SimpleNamespace(name="Someone", distance=5.0)
+
+
+def test_available_quests_in_this_zone_come_from_the_world_nearest_first():
+    a, *_ = make_assistant()
+    a.world_getter = lambda: FakeAvailableWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.pos = SimpleNamespace(map_id=10, x=50, y=50, width=1000, height=1000)
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = True
+    reply, line = a.handle("co jest do wzięcia?")
+    assert line == ""
+    assert "Westfall" in reply
+    assert "The Deadmines" in reply and "Goldtooth" in reply
+    assert "Hidden Quest" not in reply and "Other Zone Quest" not in reply
+    assert reply.index("Goldtooth") < reply.index("The Deadmines")  # the nearer starter first
+    assert a.transcript[0]["intent"] == "quest_available"
 
 
 # --------------------------------------------------------------------------- where next, reminders, loot, guides

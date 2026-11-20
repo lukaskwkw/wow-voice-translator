@@ -1308,7 +1308,8 @@ class TranslatorApp:
             return []
         try:
             items = build_suggestions(self.assistant.quests, self.world, self.assistant._player(),
-                                      self.assistant.state)
+                                      self.assistant.state,
+                                      getattr(self.assistant, "bags", None))
         except Exception:
             log.exception("building bracket suggestions failed")
             items = []
