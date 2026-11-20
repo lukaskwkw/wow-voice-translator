@@ -258,6 +258,7 @@ Questions like „co jeszcze mogę zrobić?”, „co jeszcze mogę zrobić po t
 
 **Conversation history (in memory).** The app shows what you and Iskra said, both in an `Iskra` tab and in an always-on-top overlay that can sit over WoW.
 - Both views read the same transcript kept in memory (newest first, up to 50 entries); nothing is written to disk.
+- The window keeps line breaks and shows simple Markdown (bullets, bold, `#` headings as bold body text), display only; copied text is what you see.
 - The overlay opens on the right of the screen a moment after start-up when `assistant.history_overlay` is on. Turn it on or off from the tray ("Historia rozmów Iskry") or with the Settings checkbox "Pokaż overlay z historią rozmów nad grą"; `assistant.history_limit` (5-30) sets how many entries both views show.
 - The overlay is a normal window: you can scroll it and close it, and it does not take focus from the game when it appears. It also stays visible while the app window is hidden in the tray.
 - Iskra's spontaneous comments (quest taken, level, zone, loot, bags...) also land in the history, shown in orange with a small `event: <name>` line and the entry fields `event` / `route: event` (a question answer has neither). Hide them with the "Komentarze" toggle in the overlay or the Settings checkbox "Pokaż automatyczne komentarze Iskry (np. po wzięciu questa)" (config `assistant.history_events`). Hiding them only hides those history entries; she still says the comments, just as before.

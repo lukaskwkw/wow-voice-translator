@@ -843,6 +843,47 @@ def test_history_html_can_hide_spontaneous_comments():
     assert "Zrob quest." in newest_question
 
 
+def test_history_html_keeps_line_breaks_and_shows_bullets():
+    from wvt.history_text import render_history_html
+
+    items = [{"at": 1700000001, "heard": "co teraz?", "reply": "Nagłówek\n- pierwszy punkt\n- drugi punkt",
+              "intent": "chat", "ms": 5}]
+    out = render_history_html(items)
+    assert "white-space:pre-wrap" in out
+    assert "Nagłówek\n• pierwszy punkt\n• drugi punkt" in out
+    assert "<h" not in out
+    assert "- pierwszy punkt" not in out
+
+
+def test_history_html_headings_become_bold_body_text():
+    from wvt.history_text import render_history_html
+
+    items = [{"at": 1700000001, "heard": "co teraz?", "reply": "# Duży\n## Mniejszy", "intent": "chat", "ms": 5}]
+    out = render_history_html(items)
+    assert "<b>Duży</b>" in out and "<b>Mniejszy</b>" in out
+    assert "<h1>" not in out and "<h2>" not in out
+    assert "# Duży" not in out and "# Mniejszy" not in out
+
+
+def test_history_html_bold_markdown_is_display_only_and_still_escaped():
+    from wvt.history_text import render_history_html
+
+    items = [{"at": 1700000001, "heard": "co teraz?", "reply": "**ważne**", "intent": "chat", "ms": 5}]
+    out = render_history_html(items)
+    assert "<b>ważne</b>" in out and "**ważne**" not in out
+    literal = [{"at": 1700000001, "heard": "co teraz?", "reply": "<b>odp</b>", "intent": "chat", "ms": 5}]
+    out = render_history_html(literal)
+    assert "&lt;b&gt;odp&lt;/b&gt;" in out and "<b>odp</b>" not in out
+
+
+def test_history_html_draws_an_arrow_for_the_ascii_arrow():
+    from wvt.history_text import render_history_html
+
+    items = [{"at": 1700000001, "heard": "co teraz?", "reply": "poz. 18 -> bierę", "intent": "chat", "ms": 5}]
+    out = render_history_html(items)
+    assert "poz. 18 → bierę" in out and " -> " not in out
+
+
 def test_respond_puts_spontaneous_comments_into_the_transcript():
     a, *_ = make_assistant()
     a._respond("Gracz właśnie wziął questa.", "", "", event="quest")

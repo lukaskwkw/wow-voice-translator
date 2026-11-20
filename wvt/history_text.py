@@ -7,9 +7,18 @@ QApplication.
 from __future__ import annotations
 
 import html
+import re
 import time
 
 EMPTY_TEXT = "Brak rozmów. Przytrzymaj mouse5 i powiedz coś do Iskry."
+
+
+def _light_markdown(text: str) -> str:
+    """Display-only Markdown: '#' headings as bold body text, '- ' bullets, '**x**' bold, ' -> ' as an arrow."""
+    text = re.sub(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*$", r"<b>\1</b>", text)
+    text = re.sub(r"(?m)^-[ \t]+", "• ", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    return text.replace(" -&gt; ", " → ").replace(" -> ", " → ")
 
 
 def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra", show_events: bool = True) -> str:
@@ -36,13 +45,13 @@ def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra",
         at = float(e.get("at") or 0)
         when = time.strftime("%H:%M:%S", time.localtime(at)) if at else "--:--:--"
         heard = html.escape(str(e.get("heard") or ""))
-        reply = html.escape(str(e.get("reply") or ""))
+        reply = _light_markdown(html.escape(str(e.get("reply") or "")))
         fixed = html.escape(str(e.get("fixed") or ""))
         intent = html.escape(str(e.get("intent") or ""))
         if e.get("event"):
             event = html.escape(str(e.get("event")))
             block = (
-                f"<div style='margin-bottom:10px'>"
+                f"<div style='margin-bottom:10px; white-space:pre-wrap'>"
                 f"<span style='color:#888888'>{when}</span> "
                 f"<b style='color:#ff9f43'>{html.escape(name)} (automatycznie):</b> {reply}"
                 f"<br><span style='color:#777777;font-size:9pt'>event: {event}</span>"
@@ -63,7 +72,7 @@ def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra",
                 bits.append("fallback=local")
         meta = " · ".join(b for b in bits if b)
         block = (
-            f"<div style='margin-bottom:10px'>"
+            f"<div style='margin-bottom:10px; white-space:pre-wrap'>"
             f"<span style='color:#888888'>{when}</span> "
             f"<b>Ty:</b> {heard}"
         )
