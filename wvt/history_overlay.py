@@ -21,6 +21,7 @@ QDialog { background: #14141c; }
 QTextBrowser { background: #1b1b26; color: #e6e6ee; border: 1px solid #2c2c3a; }
 QPushButton { background: #26263a; color: #e6e6ee; border: 1px solid #3a3a52; padding: 4px 10px; }
 QPushButton:hover { background: #32324a; }
+QPushButton:checked { background: #16324f; color: #7cc4ff; border: 1px solid #3b82f6; }
 """
 
 
@@ -48,7 +49,7 @@ class HistoryOverlay(QDialog):
     closed = Signal()
 
     def __init__(self, items_getter, clear_callback, cfg, on_ask=None, on_skip=None, skip_pending=None,
-                 on_prompt=None, suggestions=None, parent=None):
+                 on_prompt=None, suggestions=None, directives=None, on_events=None, parent=None):
         super().__init__(parent)
         self._items_getter = items_getter
         self._clear_callback = clear_callback
@@ -58,6 +59,8 @@ class HistoryOverlay(QDialog):
         self._skip_pending = skip_pending
         self._on_prompt = on_prompt
         self._suggestions = suggestions
+        self._directives = directives
+        self._on_events = on_events
         self.setWindowTitle("Iskra – historia rozmów")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -72,11 +75,12 @@ class HistoryOverlay(QDialog):
 
         ask_row = QHBoxLayout()
         self.ask = QLineEdit()
-        self.ask.setPlaceholderText("Napisz do Iskry…")
-        self.ask.setToolTip("Wpisz [ aby wybrać quest, NPC lub miejsce z danych gry")
+        self.ask.setPlaceholderText("Napisz do Iskry… ([ lub { = podpowiedzi)")
+        self.ask.setToolTip("Wpisz [ lub { aby wybrać nazwę albo regułę")
         self.ask.returnPressed.connect(self._send)
         self._completer = (BracketCompleter(self.ask, suggestions,
                                             enabled=lambda: bool(self.cfg.get("assistant.autocomplete", True)),
+                                            brace_getter=directives,
                                             parent=self)
                            if suggestions is not None else None)
         b_send = QPushButton("Wyślij")
@@ -97,11 +101,17 @@ class HistoryOverlay(QDialog):
         b_copy.clicked.connect(self._copy_selection)
         self.b_prompt = QPushButton("Prompt")
         self.b_prompt.clicked.connect(self._show_prompt)
+        self.b_events = QPushButton("Komentarze")
+        self.b_events.setCheckable(True)
+        self.b_events.setChecked(bool(self.cfg.get("assistant.history_events", True)))
+        self.b_events.setToolTip("Pokaż automatyczne komentarze Iskry w historii (np. po wzięciu questa)")
+        self.b_events.toggled.connect(self._toggle_events)
         b_close = QPushButton("Zamknij")
         b_close.clicked.connect(self.close)
         row.addWidget(b_clear)
         row.addWidget(b_copy)
         row.addWidget(self.b_prompt)
+        row.addWidget(self.b_events)
         row.addStretch(1)
         row.addWidget(b_close)
         lay.addLayout(row)
@@ -118,11 +128,16 @@ class HistoryOverlay(QDialog):
         items = self._items_getter() or []
         limit = int(self.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.cfg.get("assistant.name", "Iskra") or "Iskra")
-        update_history_view(self.view, render_history_html(items, limit, name), force)
+        show_events = bool(self.cfg.get("assistant.history_events", True))
+        update_history_view(self.view, render_history_html(items, limit, name, show_events=show_events), force)
         if self.b_skip.isChecked() and self._skip_pending is not None and not self._skip_pending():
             self.b_skip.blockSignals(True)
             self.b_skip.setChecked(False)
             self.b_skip.blockSignals(False)
+        if self.b_events.isChecked() != show_events:
+            self.b_events.blockSignals(True)
+            self.b_events.setChecked(show_events)
+            self.b_events.blockSignals(False)
 
     def _on_clear(self) -> None:
         try:
@@ -168,6 +183,14 @@ class HistoryOverlay(QDialog):
             self.b_skip.blockSignals(True)
             self.b_skip.setChecked(False)
             self.b_skip.blockSignals(False)
+
+    def _toggle_events(self, checked: bool) -> None:
+        if self._on_events is not None:
+            try:
+                self._on_events(checked)
+            except Exception:
+                pass
+        self.refresh()
 
     def _show_prompt(self) -> None:
         if self._on_prompt is None:

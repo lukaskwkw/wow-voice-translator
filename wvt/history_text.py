@@ -12,8 +12,11 @@ import time
 EMPTY_TEXT = "Brak rozmów. Przytrzymaj mouse5 i powiedz coś do Iskry."
 
 
-def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra") -> str:
-    """The newest `limit` entries, oldest first, as simple inline HTML for QTextBrowser."""
+def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra", show_events: bool = True) -> str:
+    """The newest `limit` entries, oldest first, as simple inline HTML for QTextBrowser.
+
+    `show_events=False` hides Iskra's spontaneous comments (entries with `event`).
+    """
     if not items:
         return f"<p style='color:#888888'>{html.escape(EMPTY_TEXT)}</p>"
     try:
@@ -22,7 +25,12 @@ def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra")
         shown = 10
     if shown <= 0:
         return ""
-    entries = list(items)[:shown][::-1]  # newest first -> chronological
+    seq = list(items)
+    if not show_events:
+        seq = [e for e in seq if not e.get("event")]
+        if not seq:
+            return f"<p style='color:#888888'>{html.escape(EMPTY_TEXT)}</p>"
+    entries = seq[:shown][::-1]  # newest first -> chronological
     parts: list[str] = []
     for e in entries:
         at = float(e.get("at") or 0)
@@ -31,6 +39,17 @@ def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra")
         reply = html.escape(str(e.get("reply") or ""))
         fixed = html.escape(str(e.get("fixed") or ""))
         intent = html.escape(str(e.get("intent") or ""))
+        if e.get("event"):
+            event = html.escape(str(e.get("event")))
+            block = (
+                f"<div style='margin-bottom:10px'>"
+                f"<span style='color:#888888'>{when}</span> "
+                f"<b style='color:#ff9f43'>{html.escape(name)} (automatycznie):</b> {reply}"
+                f"<br><span style='color:#777777;font-size:9pt'>event: {event}</span>"
+                f"</div>"
+            )
+            parts.append(block)
+            continue
         ms = e.get("ms")
         bits = [intent, f"{ms} ms" if ms is not None else ""]
         llm = e.get("llm") if isinstance(e.get("llm"), dict) else {}

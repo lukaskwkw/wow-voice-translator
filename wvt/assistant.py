@@ -69,6 +69,7 @@ from .advisor import Advice, CLASS_EN, dungeons_for_level, find_item, find_place
 from .bags import BagBook
 from .chat_insert import build_chat_line
 from .config import resolve_path
+from .directives import DIRECTIVES, is_real_question, split as split_directives
 from .jev import JevDecision, jev_router
 from .kb.world import Player
 from .lexicon import Correction, Lexicon
@@ -1063,31 +1064,43 @@ class Assistant:
         corr = self._correct(polish)
         self.last_correction = corr
         text = corr.text
-        local = Intent("chat") if force_chat else parse_intent(text)
-        local_kind = local.kind
-        intent = local
-        route = "rules" if local_kind != "chat" else "chat"
-        if force_chat:
-            local_kind = "skipped"
-            route = "forced-chat"
-        elif intent.kind == "chat" and self.router is not None:
-            routed = self._route_intent(text)
-            if routed is not None:
-                intent = routed
-                route = "jev"
-        self._sources = []
-        try:
-            reply, line = self._dispatch(intent, text)
-        except Exception:
-            log.exception("assistant failed on intent %s", intent.kind)
-            reply, line = "Coś mi się popsuło, spróbuj jeszcze raz.", ""
+        kinds, rest = split_directives(text)
+        if kinds:
+            # "{quest_available} co wziąć?": explicit rules, optionally summarised by the LLM
+            self._sources = []
+            local_kind = "directives"
+            compose = (not force_chat) and is_real_question(rest)
+            route = "directives+llm" if compose else "directives"
+            reply, line = self._run_directives(kinds, rest, compose)
+            final = "directives:" + ",".join(kinds)
+            if reply:
+                self._remember(rest or text, reply)
+        else:
+            local = Intent("chat") if force_chat else parse_intent(text)
+            local_kind = local.kind
+            intent = local
+            route = "rules" if local_kind != "chat" else "chat"
+            if force_chat:
+                local_kind = "skipped"
+                route = "forced-chat"
+            elif intent.kind == "chat" and self.router is not None:
+                routed = self._route_intent(text)
+                if routed is not None:
+                    intent = routed
+                    route = "jev"
+            self._sources = []
+            try:
+                reply, line = self._dispatch(intent, text)
+            except Exception:
+                log.exception("assistant failed on intent %s", intent.kind)
+                reply, line = "Coś mi się popsuło, spróbuj jeszcze raz.", ""
+            if reply:
+                self._remember(text, reply)
+            final = intent.kind + (f":{intent.channel}" if intent.channel else "")
         status = ""
         if line:
             status = self.inserter.insert(line, self.wow_foreground())
-        if reply:
-            self._remember(text, reply)
         st = self.state
-        final = intent.kind + (f":{intent.channel}" if intent.channel else "")
         ms = round((time.perf_counter() - t0) * 1000)
         log.info("assistant: local=%s route=%s final=%s sources=%s ms=%d",
                  local_kind, route, final, ", ".join(self._sources[:3]) or "rules", ms)
@@ -1121,6 +1134,35 @@ class Assistant:
 
     def clear_transcript(self) -> None:
         self.transcript.clear()
+
+    def _run_directives(self, kinds: list[str], rest: str, compose: bool) -> tuple[str, str]:
+        """Answer from the named rules only; ``compose`` lets the LLM turn their facts into one answer."""
+        results: list[tuple[str, str]] = []
+        for kind in kinds:
+            try:
+                reply, _line = self._dispatch(Intent(kind), rest)
+            except Exception:
+                log.exception("directive %s failed", kind)
+                reply = ""
+            if reply:
+                results.append((kind, reply))
+        facts = "\n".join(f"- {kind}: {reply}" for kind, reply in results if reply)
+        if not facts:
+            return "Nie mam nic do dodania z tych reguł.", ""
+        self._sources = [f"directives: {', '.join(kinds)}"] + self._sources
+        deterministic = " ".join(reply for _kind, reply in results if reply)
+        if not compose:
+            return deterministic, ""
+        extra = str(self.cfg.get("assistant.persona_extra", "") or "")
+        system = PERSONA.format(name=self.name, extra=(" " + extra) if extra else "") + \
+            "\nFakty z wybranych reguł (używaj tylko ich, nie wymyślaj nowych faktów):\n" + facts
+        messages = [{"role": "system", "content": system}, *self._recent_history(),
+                    {"role": "user", "content": rest}]
+        out = self._llm_text(messages, max_tokens=320, temperature=0.3,
+                             limit=max(500, self._long_limit()))
+        source = "directives+llm" if out else "directives+llm (fallback)"
+        self._sources.append(source)
+        return (out or deterministic), ""
 
     # ------------------------------------------------------------------ the conversation and its topic
     def _remember(self, polish: str, reply: str) -> None:
@@ -2354,6 +2396,11 @@ class Assistant:
         """Show and speak an answer; ``event`` names a spontaneous one for the journal ("" = a question)."""
         if event and (reply or line):
             self._journal({"event": event, "reply": reply, "line": line})
+            self.transcript.appendleft({
+                "at": time.time(), "heard": "", "fixed": "", "reply": reply, "line": line,
+                "intent": f"event:{event}", "route": "event", "llm": dict(self._last_llm),
+                "sources": list(self._sources), "ms": 0, "event": event,
+            })
         if event and reply:  # her own comment is part of the talk ("a co jest na końcu?" right after it)
             self._history.append({"role": "assistant", "content": reply, "at": time.time()})
         footer = ""

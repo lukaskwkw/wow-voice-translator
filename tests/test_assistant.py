@@ -8,6 +8,7 @@ import pytest
 
 from wvt import protocol as P
 from wvt.assistant import Assistant, ChatLog, READ_KINDS, clean_reply, is_invite_request, match_name, parse_intent
+from wvt.directives import DIRECTIVES, is_real_question, split
 
 
 @pytest.mark.parametrize("text,kind", [
@@ -788,6 +789,57 @@ def test_history_html_shows_the_llm_provider_model_and_variant():
     assert "fallback=local" not in out
 
 
+def test_history_html_shows_spontaneous_comments_in_orange():
+    from wvt.history_text import render_history_html
+
+    items = [
+        {"at": 1700000002, "heard": "co teraz?", "reply": "Zrob quest.", "intent": "chat", "ms": 4},
+        {"at": 1700000001, "heard": "", "reply": "Wzięłaś questa.", "intent": "event:quest",
+         "route": "event", "event": "quest", "ms": 0},
+    ]
+    out = render_history_html(items, limit=10)
+    assert "color:#ff9f43" in out and "(automatycznie)" in out and "Wzięłaś questa." in out
+    assert "event: quest" in out
+    event_block = out.split("(automatycznie)")[1].split("event: quest")[0]
+    assert "Ty:" not in event_block  # the comment has no "Ty:" line
+    assert "Zrob quest." in out and "Ty:</b> co teraz?" in out
+
+
+def test_history_html_can_hide_spontaneous_comments():
+    from wvt.history_text import EMPTY_TEXT, render_history_html
+
+    items = [
+        {"at": 1700000003, "heard": "", "reply": "Komenda.", "intent": "event:level", "event": "level", "ms": 0},
+        {"at": 1700000002, "heard": "co teraz?", "reply": "Zrob quest.", "intent": "chat", "ms": 4},
+        {"at": 1700000001, "heard": "", "reply": "Wzięłaś questa.", "intent": "event:quest", "event": "quest", "ms": 0},
+    ]
+    out = render_history_html(items, show_events=False)
+    assert "Zrob quest." in out and "Ty:</b> co teraz?" in out
+    assert "Wzięłaś questa." not in out and "Komenda." not in out and "automatycznie" not in out
+    only_events = [e for e in items if e.get("event")]
+    assert "Brak rozmów" in render_history_html(only_events, show_events=False)
+    assert EMPTY_TEXT.split(".")[0] in render_history_html(only_events, show_events=False)
+    # the filter runs before the limit, so the newest question is still shown
+    newest_question = render_history_html(items, limit=1, show_events=False)
+    assert "Zrob quest." in newest_question
+
+
+def test_respond_puts_spontaneous_comments_into_the_transcript():
+    a, *_ = make_assistant()
+    a._respond("Gracz właśnie wziął questa.", "", "", event="quest")
+    item = a.transcript[0]
+    assert item["event"] == "quest"
+    assert item["intent"] == "event:quest"
+    assert item["route"] == "event"
+    assert item["reply"] == "Gracz właśnie wziął questa."
+    count = len(a.transcript)
+    a._respond("Odpowiedź na pytanie.", "", "", event="")
+    assert len(a.transcript) == count  # a question answer does not add an event entry
+    a.handle("ile mam złota?")
+    assert len(a.transcript) == count + 1
+    assert "event" not in a.transcript[0] and a.transcript[0]["intent"] != "event:"
+
+
 # --------------------------------------------------------------------------- the names of the moment, what you carry
 
 def bag_pkt(sync, part, parts, *lines):
@@ -1022,3 +1074,53 @@ def test_force_chat_skips_the_rules_and_jev(monkeypatch):
     assert reply and line == ""
     assert a.transcript[0]["route"] == "forced-chat"
     assert a.transcript[0]["intent"] == "chat"
+
+
+# --------------------------------------------------------------------------- rules as {fragments}
+
+def test_directive_split_keeps_only_known_tokens():
+    kinds, rest = split("{quest_list} pokaż {NOPE} {quest_turnin}  coś")
+    assert kinds == ["quest_list", "quest_turnin"]
+    assert rest == "pokaż {NOPE} coś"
+
+
+def test_directive_split_dedupes_and_leaves_unknown_braces():
+    assert split("{help} {HELP}") == (["help"], "")
+    assert split("{foo} cześć") == ([], "{foo} cześć")
+
+
+def test_directive_is_real_question():
+    assert is_real_question("") is False
+    assert is_real_question("pokaż") is False
+    assert is_real_question("pokaż mi listę") is False
+    assert is_real_question("co dalej?") is True
+    assert is_real_question("questy w tej strefie") is True
+
+
+def test_bare_directive_is_answered_by_the_rule_without_the_llm():
+    a, ins, ui, voice, llm = make_assistant()
+    reply, line = a.handle("{help}")
+    assert "Zapraszam tych" in reply and line == ""
+    assert llm.calls == []
+    assert a.transcript[0]["route"] == "directives"
+    assert a.transcript[0]["intent"] == "directives:help"
+
+
+def test_directive_with_a_question_lets_the_llm_compose_from_the_fact():
+    a, ins, ui, voice, llm = make_assistant()
+    reply, line = a.handle("{help} co dalej?")
+    assert reply == llm.answer and line == ""
+    assert llm.calls, "the hybrid path must call the LLM"
+    request = a.last_llm_request
+    assert "help:" in request["messages"][0]["content"]
+    assert request["messages"][-1] == {"role": "user", "content": "co dalej?"}
+    assert a.transcript[0]["route"] == "directives+llm"
+    assert a.transcript[0]["intent"].startswith("directives:")
+
+
+def test_bez_regul_keeps_the_directive_deterministic():
+    a, ins, ui, voice, llm = make_assistant()
+    reply, line = a.handle("{help} co dalej?", force_chat=True)
+    assert "Zapraszam tych" in reply and line == ""
+    assert llm.calls == []
+    assert a.transcript[0]["route"] == "directives"

@@ -55,10 +55,10 @@ def fold(text: str) -> str:
     return " ".join(t.split())
 
 
-def bracket_context(text: str, cursor: int) -> Optional[tuple[int, str]]:
-    """``(index_of_bracket, text_after_it)`` for an open ``[`` before ``cursor``, else None.
+def delimiter_context(text: str, cursor: int, opener: str = "[", closer: str = "]") -> Optional[tuple[int, str]]:
+    """``(index_of_opener, text_after_it)`` for an unclosed ``opener`` before ``cursor``.
 
-    A ``]`` met first means the bracket is already closed; a cursor outside the text is
+    A ``closer`` met first means the pair is already closed; a cursor outside the text is
     ignored.
     """
     if cursor < 1 or cursor > len(text):
@@ -66,12 +66,17 @@ def bracket_context(text: str, cursor: int) -> Optional[tuple[int, str]]:
     i = cursor - 1
     while i >= 0:
         ch = text[i]
-        if ch == "]":
+        if ch == closer:
             return None
-        if ch == "[":
+        if ch == opener:
             return i, text[i + 1:cursor]
         i -= 1
     return None
+
+
+def bracket_context(text: str, cursor: int) -> Optional[tuple[int, str]]:
+    """``[`` context; delegates to :func:`delimiter_context`."""
+    return delimiter_context(text, cursor, "[", "]")
 
 
 def _clean(name: str) -> str:
@@ -442,14 +447,24 @@ def filter_suggestions(items: Iterable[Suggestion], query: str, limit: int = 200
     return out
 
 
-def apply_suggestion(text: str, cursor: int, name: str) -> tuple[str, int]:
-    """Replace the open ``[`` and what was typed with ``[name]``; return text and new cursor."""
-    ctx = bracket_context(text, cursor)
+def apply_delimited(text: str, cursor: int, name: str, opener: str = "[", closer: str = "]") -> tuple[str, int]:
+    """Replace the open ``opener`` and what was typed with ``opener + name + closer``.
+
+    An existing ``closer`` right at the cursor is consumed rather than duplicated; text
+    after it is kept. Returns the new text and the cursor placed after the inserted
+    closer.
+    """
+    ctx = delimiter_context(text, cursor, opener, closer)
     if ctx is None:
         return text, cursor
     start, _ = ctx
     end = cursor
-    if end < len(text) and text[end] == "]":
+    if end < len(text) and text[end] == closer:
         end += 1
-    new_text = text[:start] + "[" + name + "]" + text[end:]
+    new_text = text[:start] + opener + name + closer + text[end:]
     return new_text, start + len(name) + 2
+
+
+def apply_suggestion(text: str, cursor: int, name: str) -> tuple[str, int]:
+    """Replace the open ``[`` and what was typed with ``[name]``; return text and new cursor."""
+    return apply_delimited(text, cursor, name, "[", "]")

@@ -45,6 +45,7 @@ from .audio import AudioRecorder, analyze, dbfs, input_gain, trim_and_normalize
 from .chat_insert import ChatInserter, build_chat_line, set_clipboard_text
 from .completer import BracketCompleter
 from .config import ROOT, Config
+from .directives import DIRECTIVES
 from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
 from .history_overlay import HistoryOverlay, render_history_html, update_history_view
@@ -52,7 +53,7 @@ from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
 from .pipeline import HistoryItem, PushToTalkPipeline
 from .signal_reader import SignalReader
-from .suggest import build_suggestions
+from .suggest import Suggestion, build_suggestions
 from .wow_window import WowWindow, WowWindowTracker
 
 log = logging.getLogger("wvt.app")
@@ -266,7 +267,8 @@ class MainWindow(QWidget):
         lay.addLayout(ask_row)
         self._history_completer = BracketCompleter(
             self.ask_history, self.app.suggestion_items, parent=self,
-            enabled=lambda: bool(self.app.cfg.get("assistant.autocomplete", True)))
+            enabled=lambda: bool(self.app.cfg.get("assistant.autocomplete", True)),
+            brace_getter=self.app.directive_items)
         row = QHBoxLayout()
         b_clear = QPushButton("Wyczyść historię")
         b_clear.clicked.connect(self.on_clear_assistant_history)
@@ -312,7 +314,8 @@ class MainWindow(QWidget):
         items = a.transcript_items() if a is not None else []
         limit = int(self.app.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.app.cfg.get("assistant.name", "Iskra") or "Iskra")
-        update_history_view(self.assistant_history, render_history_html(items, limit, name), force)
+        update_history_view(self.assistant_history, render_history_html(
+            items, limit, name, show_events=bool(self.app.cfg.get("assistant.history_events", True))), force)
 
     # ------------------------------------------------------------------ settings tab
     def _build_settings_tab(self) -> QWidget:
@@ -555,6 +558,9 @@ class MainWindow(QWidget):
         self.autocomplete_cb = QCheckBox("Podpowiedzi po [ w polach Iskry (questy, NPC, miejsca)")
         self.autocomplete_cb.setChecked(bool(cfg.get("assistant.autocomplete", True)))
         hf.addRow(self.autocomplete_cb)
+        self.history_events_cb = QCheckBox("Pokaż automatyczne komentarze Iskry (np. po wzięciu questa)")
+        self.history_events_cb.setChecked(bool(cfg.get("assistant.history_events", True)))
+        hf.addRow(self.history_events_cb)
         hist_note = QLabel("Overlay można też włączyć/wyłączyć z tray. Zmiany działają po zapisaniu; "
                            "historia jest w pamięci aplikacji.")
         hist_note.setWordWrap(True)
@@ -692,6 +698,7 @@ class MainWindow(QWidget):
         cfg.set("assistant.history_overlay", self.history_overlay_cb.isChecked())
         cfg.set("assistant.history_limit", int(self.history_limit.value()))
         cfg.set("assistant.autocomplete", self.autocomplete_cb.isChecked())
+        cfg.set("assistant.history_events", self.history_events_cb.isChecked())
         base = self.openai_base.text().strip() or "https://opencode.ai/inference/openai/v1"
         model = self.openai_model.text().strip()
         if not model:
@@ -1317,6 +1324,11 @@ class TranslatorApp:
         self._suggest_cache_at = now
         return items
 
+    def directive_items(self) -> list:
+        """Rule kinds for the ``{`` popup: one Suggestion per whitelisted directive."""
+        return [Suggestion(kind, "Reguła", description, kind, 0.0)
+                for kind, description in DIRECTIVES.items()]
+
     def _ensure_history_overlay(self) -> HistoryOverlay:
         if self.history_overlay is None:
             self.history_overlay = HistoryOverlay(
@@ -1325,7 +1337,9 @@ class TranslatorApp:
                 on_ask=self._ask_from_history,
                 on_skip=self._arm_skip_rules, skip_pending=self._skip_pending,
                 on_prompt=self.show_last_prompt,
-                suggestions=self.suggestion_items)
+                suggestions=self.suggestion_items,
+                directives=self.directive_items,
+                on_events=self._set_history_events)
             self.history_overlay.closed.connect(self._on_history_closed)
         return self.history_overlay
 
@@ -1352,6 +1366,19 @@ class TranslatorApp:
             cb.blockSignals(True)
             cb.setChecked(on)
             cb.blockSignals(False)
+
+    def _set_history_events(self, on: bool) -> None:
+        self.cfg.set("assistant.history_events", bool(on))
+        self.cfg.save()
+        cb = getattr(self.window, "history_events_cb", None)
+        if cb is not None and cb.isChecked() != bool(on):
+            cb.blockSignals(True)
+            cb.setChecked(bool(on))
+            cb.blockSignals(False)
+        if self.window is not None:
+            self.window.refresh_assistant_history()
+        if self.history_overlay is not None:
+            self.history_overlay.refresh()
 
     def _on_history_closed(self) -> None:
         # tray state only; the config stays as saved, so the next sync may show it again

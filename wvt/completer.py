@@ -12,7 +12,7 @@ from PySide6.QtCore import QEvent, QModelIndex, QObject, Qt, QTimer
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QCompleter, QLineEdit
 
-from .suggest import apply_suggestion, bracket_context, filter_suggestions
+from .suggest import apply_delimited, delimiter_context, filter_suggestions
 
 __all__ = ["BracketCompleter"]
 
@@ -20,10 +20,12 @@ __all__ = ["BracketCompleter"]
 class BracketCompleter(QObject):
     """Show ``[`` suggestions for ``edit``; ``items_getter()`` returns ``Suggestion`` objects."""
 
-    def __init__(self, edit: QLineEdit, items_getter, enabled=None, parent=None):
+    def __init__(self, edit: QLineEdit, items_getter, enabled=None, parent=None, brace_getter=None):
         super().__init__(parent)
         self.edit = edit
         self._items_getter = items_getter
+        self._brace_getter = brace_getter
+        self._active = ("[", "]")
         self._enabled = enabled
         self._applying = False
         self._pending = False
@@ -96,14 +98,23 @@ class BracketCompleter(QObject):
         cursor = self.edit.cursorPosition()
         self._snapshot = (text, cursor)
 
-        ctx = bracket_context(text, cursor)
+        square = delimiter_context(text, cursor, "[", "]")
+        brace = delimiter_context(text, cursor, "{", "}") if self._brace_getter is not None else None
+        if square is not None and (brace is None or square[0] >= brace[0]):
+            ctx, opener, closer = square, "[", "]"
+        elif brace is not None:
+            ctx, opener, closer = brace, "{", "}"
+        else:
+            ctx, opener, closer = None, "[", "]"
         if ctx is None:
             self._clear_rows()
             self.hide_popup()
             return
+        self._active = (opener, closer)
 
         try:
-            items = self._items_getter() or []
+            getter = self._brace_getter if opener == "{" else self._items_getter
+            items = getter() or []
         except Exception:
             items = []
         matches = filter_suggestions(items, ctx[1])
@@ -208,7 +219,8 @@ class BracketCompleter(QObject):
         name = self._by_display.get(name, name)
 
         text, cursor = self._snapshot
-        new_text, new_cursor = apply_suggestion(text, cursor, name)
+        opener, closer = self._active if self._active else ("[", "]")
+        new_text, new_cursor = apply_delimited(text, cursor, name, opener, closer)
         self._applying = True
         try:
             self.edit.setText(new_text)

@@ -6,9 +6,11 @@ import pytest
 
 from wvt.suggest import (
     Suggestion,
+    apply_delimited,
     apply_suggestion,
     bracket_context,
     build_suggestions,
+    delimiter_context,
     filter_suggestions,
     fold,
 )
@@ -39,6 +41,25 @@ def test_bracket_context_cursor_after_closed_bracket():
     assert bracket_context(text, 6) is None
 
 
+# --------------------------------------------------------------------------- delimiter_context
+
+def test_delimiter_context_brace_open():
+    assert delimiter_context("{quest", 6, "{", "}") == (0, "quest")
+
+
+def test_delimiter_context_brace_closed_is_none():
+    assert delimiter_context("{quest}", 7, "{", "}") is None
+
+
+def test_delimiter_context_nearest_opener_with_both():
+    text = "[foo {quest"
+    square = delimiter_context(text, len(text), "[", "]")
+    brace = delimiter_context(text, len(text), "{", "}")
+    assert square == (0, "foo {quest")
+    assert brace == (5, "quest")
+    assert brace[0] > square[0]
+
+
 # --------------------------------------------------------------------------- apply_suggestion
 
 def test_apply_suggestion_basic():
@@ -62,6 +83,18 @@ def test_apply_suggestion_keeps_text_after_bracket():
 
 def test_apply_suggestion_no_context_returns_unchanged():
     assert apply_suggestion("plain text", 5, "Deadmines") == ("plain text", 5)
+
+
+def test_apply_delimited_inserts_brace():
+    text, cursor = apply_delimited("pytanie {quest", 14, "quest_list", "{", "}")
+    assert text == "pytanie {quest_list}"
+    assert cursor == len(text)
+
+
+def test_apply_delimited_consumes_existing_closer():
+    text, cursor = apply_delimited("pytanie {quest}", 14, "quest_list", "{", "}")
+    assert text == "pytanie {quest_list}"
+    assert cursor == len(text)
 
 
 # --------------------------------------------------------------------------- fold / filter
@@ -380,3 +413,40 @@ def test_completer_confirm_from_edit_and_popup(key_name, on_popup):
     app.processEvents()
     assert text == "[Deadmines]", f"text={text!r}, on_popup={on_popup}"
     assert not other_focus, f"second edit gained focus (on_popup={on_popup})"
+
+
+def test_completer_brace_popup_and_tab_insert():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    QtCore = pytest.importorskip("PySide6.QtCore")
+    QtTest = pytest.importorskip("PySide6.QtTest")
+
+    from wvt.completer import BracketCompleter
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(win)
+    edit = QtWidgets.QLineEdit()
+    layout.addWidget(edit)
+    win.show()
+    app.processEvents()
+
+    completer = BracketCompleter(
+        edit, lambda: [],
+        brace_getter=lambda: [Suggestion("quest_list", "Reguła"),
+                              Suggestion("quest_turnin", "Reguła")])
+    edit.setFocus()
+    QtTest.QTest.keyClicks(edit, "{quest")
+    app.processEvents()
+    popup = completer._completer.popup()
+    assert popup is not None and popup.isVisible(), "brace popup did not open"
+    assert completer._model.rowCount() > 0, "brace popup has no rows"
+    QtTest.QTest.keyClick(edit, QtCore.Qt.Key.Key_Tab)
+    app.processEvents()
+
+    text = edit.text()
+    win.close()
+    app.processEvents()
+    assert text == "{quest_list}", f"text={text!r}"

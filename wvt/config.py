@@ -63,6 +63,7 @@ DEFAULTS: dict[str, Any] = {
         "context_log_file": "logs/context_history.jsonl",  # full LLM messages (privacy.log_llm_context)
         "history_overlay": True,  # always-on-top conversation history over WoW
         "history_limit": 10,      # entries shown in the overlay/tab
+        "history_events": True,  # spontaneous comments (quest taken, zone, level...) in the history
         "autocomplete": True,  # "[" suggestions in the Iskra inputs; false disables the popup
         # assistant.llm: local | gemini | openai - with gemini she talks through Google Gemini (key in .env, section
         # "gemini"), with openai through any OpenAI-compatible cloud API (section "assistant.openai"); translations
