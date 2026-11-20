@@ -44,7 +44,7 @@ from .chat_insert import ChatInserter, build_chat_line, set_clipboard_text
 from .config import ROOT, Config
 from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
-from .history_overlay import HistoryOverlay, render_history_html
+from .history_overlay import HistoryOverlay, render_history_html, update_history_view
 from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
 from .pipeline import HistoryItem, PushToTalkPipeline
@@ -265,20 +265,16 @@ class MainWindow(QWidget):
 
     def on_clear_assistant_history(self) -> None:
         self.app._clear_assistant_history()
-        self.refresh_assistant_history()
+        self.refresh_assistant_history(force=True)
 
-    def refresh_assistant_history(self) -> None:
+    def refresh_assistant_history(self, force: bool = False) -> None:
         if not self.isVisible():
             return
         a = self.app.assistant
         items = a.transcript_items() if a is not None else []
         limit = int(self.app.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.app.cfg.get("assistant.name", "Iskra") or "Iskra")
-        bar = self.assistant_history.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum() - 2
-        self.assistant_history.setHtml(render_history_html(items, limit, name))
-        if at_bottom:
-            bar.setValue(bar.maximum())
+        update_history_view(self.assistant_history, render_history_html(items, limit, name), force)
 
     # ------------------------------------------------------------------ settings tab
     def _build_settings_tab(self) -> QWidget:

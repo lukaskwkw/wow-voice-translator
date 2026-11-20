@@ -181,6 +181,8 @@ Hold **mouse button 5** and say what you want in Polish.
 | „ile expa na godzinę?”, „brać need czy greed?” | session stats; loot roll advice |
 | game questions („jak pokonać VanCleefa?”) | answers from the local knowledge base |
 
+Questions like „co jeszcze mogę zrobić?”, „co jeszcze mogę zrobić po tym queście?” go to the planner: the quest journal plus QuestieDB world data through `advisor.where_next`, so she proposes what to take next - not the diary-only `quest_info` answer. The wiki/knowledge base is only a lore fallback.
+
 **A smarter assistant with Gemini (optional).**
 - Put `GOOGLE_AI_API_KEY=...` (from Google AI Studio) in `.env` and set `"assistant": {"llm": "gemini"}` in `config.json`. Only the assistant uses Gemini; chat translation stays local.
 - Her answers take 2–3 seconds instead of under a second, but they are much better in Polish.

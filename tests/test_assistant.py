@@ -59,6 +59,19 @@ def test_ordinary_questions_are_not_mistaken_for_commands(text):
     assert parse_intent(text).kind == "chat"
 
 
+@pytest.mark.parametrize("text", [
+    "Co jeszcze mogę zrobić ciekawego po tym queście w Stormwind Keep?",
+    "Co jeszcze mogę zrobić?",
+    "co jeszcze moge zrobic po tym questcie",
+])
+def test_what_else_can_i_do_goes_to_the_planner(text):
+    assert parse_intent(text).kind == "where_next"
+
+
+def test_what_else_can_i_do_inside_this_quest_is_quest_info():
+    assert parse_intent("Co jeszcze mogę zrobić w tym queście?").kind != "where_next"
+
+
 def test_messages_keep_the_spoken_words_and_find_the_addressee():
     it = parse_intent("napisz do Bolka że czekam w Goldshire")
     assert (it.channel, it.spoken, it.message) == ("whisper", "bolka", "czekam w Goldshire")

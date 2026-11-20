@@ -406,7 +406,9 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("where_next", r"\bgdzie\b.*\b(udac|isc dalej|dalej isc|expic|expie|levelowac|lvlowac|lewelowac|farmic|questowac"
                    r"|teraz isc|nastepnie)\b|\bco (mam |powinienem |powinnam )?(teraz|dalej|nastepnie) (robic|zrobic)\b"
                    r"|\b(doradz\w*|zaproponuj\w*)\b|\bco (polecasz|proponujesz|radzisz|doradzasz)\b"
-                   r"|\bjak\w* (strefa|strefe|lokacja|lokacje|kraina|kraine|miejsce|teren)\b|\bdokad (teraz|dalej|mam|isc|sie)\b"),
+                   r"|\bjak\w* (strefa|strefe|lokacja|lokacje|kraina|kraine|miejsce|teren)\b|\bdokad (teraz|dalej|mam|isc|sie)\b"
+                   r"|\bco jeszcze\b(?!.*\bw (tym|tego) (?:quest|quesc)\w*).*\b(robic|zrobic)\b"
+                   r"|\bco jeszcze\b.*\bpo (tym|tego) (?:quest|quesc)\w*"),
     ("lang_pl", r"\b(przelacz\w*|zmien\w*|ustaw\w*|tryb\w*|niech|mow\w*|czytaj\w*|tlumacz\w*)\b.*"
                 r"\b(po polsku|na polski|polski)\b"),
     ("lang_en", r"\b(przelacz\w*|zmien\w*|ustaw\w*|tryb\w*|niech|mow\w*|czytaj\w*|wroc\w*)\b.*"

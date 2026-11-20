@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLineEdit, QPushButton, QTex
 
 from .history_text import render_history_html
 
-__all__ = ["HistoryOverlay", "render_history_html"]
+__all__ = ["HistoryOverlay", "render_history_html", "update_history_view"]
 
 _STYLE = """
 QDialog { background: #14141c; }
@@ -21,6 +21,24 @@ QTextBrowser { background: #1b1b26; color: #e6e6ee; border: 1px solid #2c2c3a; }
 QPushButton { background: #26263a; color: #e6e6ee; border: 1px solid #3a3a52; padding: 4px 10px; }
 QPushButton:hover { background: #32324a; }
 """
+
+
+def update_history_view(view, html: str, force: bool = False) -> bool:
+    """Set the history HTML only when it changed, keeping the user's selection and scroll position."""
+    if not force and getattr(view, "_wvt_history_html", None) == html:
+        return False
+    if not force and view.hasFocus() and view.textCursor().hasSelection():
+        return False  # never wipe a selection the user is making/holding
+    bar = view.verticalScrollBar()
+    at_bottom = bar.value() >= bar.maximum() - 2
+    value = bar.value()
+    view.setHtml(html)
+    view._wvt_history_html = html
+    if at_bottom:
+        bar.setValue(bar.maximum())
+    else:
+        bar.setValue(min(value, bar.maximum()))
+    return True
 
 
 class HistoryOverlay(QDialog):
@@ -59,9 +77,12 @@ class HistoryOverlay(QDialog):
         row = QHBoxLayout()
         b_clear = QPushButton("Wyczyść")
         b_clear.clicked.connect(self._on_clear)
+        b_copy = QPushButton("Kopiuj")
+        b_copy.clicked.connect(self._copy_selection)
         b_close = QPushButton("Zamknij")
         b_close.clicked.connect(self.close)
         row.addWidget(b_clear)
+        row.addWidget(b_copy)
         row.addStretch(1)
         row.addWidget(b_close)
         lay.addLayout(row)
@@ -74,21 +95,23 @@ class HistoryOverlay(QDialog):
         self.refresh()
 
     # ------------------------------------------------------------------ content
-    def refresh(self) -> None:
+    def refresh(self, force: bool = False) -> None:
         items = self._items_getter() or []
         limit = int(self.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.cfg.get("assistant.name", "Iskra") or "Iskra")
-        bar = self.view.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum() - 2
-        self.view.setHtml(render_history_html(items, limit, name))
-        if at_bottom:
-            bar.setValue(bar.maximum())
+        update_history_view(self.view, render_history_html(items, limit, name), force)
 
     def _on_clear(self) -> None:
         try:
             self._clear_callback()
         finally:
-            self.refresh()
+            self.refresh(force=True)
+
+    def _copy_selection(self) -> None:
+        cursor = self.view.textCursor()
+        if not cursor.hasSelection():
+            return
+        QGuiApplication.clipboard().setText(cursor.selection().toPlainText())
 
     def _send(self) -> None:
         text = self.ask.text().strip()
