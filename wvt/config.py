@@ -233,6 +233,7 @@ DEFAULTS: dict[str, Any] = {
         "request_timeout_s": 15,
         "max_retries": 2,
         "speak_own_messages": True,  # EN mode: your character repeats your line in its voice
+        "stop_key": "pause",  # global key that stops the reader ("" = off)
         "volume_say": 1.0,
         "volume_party": 0.9,
         # /say volume by distance in yards (linear between points); beyond the last point = silent

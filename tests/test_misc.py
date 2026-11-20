@@ -38,6 +38,30 @@ def test_default_hotkeys_are_distinct():
     assert {b["channel"] for b in DEFAULTS["push_to_talk"]} == {"say", "party", "assistant"}
 
 
+def test_stop_key_default_is_pause():
+    assert DEFAULTS["voice"]["stop_key"] == "pause"
+    cfg = Config(_deep_merge(DEFAULTS, {}))
+    assert cfg.get("voice.stop_key") == "pause"
+    assert parse_key(cfg.get("voice.stop_key")).code == parse_key("pause").code
+
+
+def test_stop_hotkey_silences_the_voice():
+    pytest.importorskip("PySide6.QtWidgets")
+    from types import SimpleNamespace
+
+    from wvt.app import TranslatorApp
+
+    calls = []
+    stub = SimpleNamespace(
+        voice=SimpleNamespace(silence=lambda: calls.append("silence")),
+        pipeline=SimpleNamespace(on_press=lambda channel: calls.append(f"press:{channel}")),
+    )
+    TranslatorApp._on_hotkey(stub, "press", "stop")
+    assert calls == ["silence"]
+    TranslatorApp._on_hotkey(stub, "release", "stop")
+    assert calls == ["silence"]
+
+
 # ----------------------------------------------------------------- config
 def test_config_deep_merge_and_save(tmp_path):
     path = tmp_path / "config.json"

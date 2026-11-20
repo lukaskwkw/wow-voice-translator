@@ -47,6 +47,9 @@ from wvt.directives import DIRECTIVES, is_real_question, split
     ("wyłącz głosy na say", "voice_say"),
     ("przełącz na polski", "lang_pl"),
     ("cicho", "stop"),
+    ("Iskra, cicho", "stop"),
+    ("hej iskra stop", "stop"),
+    ("milcz", "stop"),
     ("co umiesz?", "help"),
     ("jak się masz piękna?", "chat"),
 ])
@@ -60,6 +63,11 @@ def test_polish_requests_become_intents(text, kind):
 ])
 def test_ordinary_questions_are_not_mistaken_for_commands(text):
     assert parse_intent(text).kind == "chat"
+
+
+@pytest.mark.parametrize("text", ["stopa", "iskra"])
+def test_stop_rule_needs_the_command_itself(text):
+    assert parse_intent(text).kind != "stop"
 
 
 @pytest.mark.parametrize("text", [

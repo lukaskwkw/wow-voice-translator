@@ -311,7 +311,10 @@ class VoiceManager:
         text = job.pkt.text.strip()
         if job.prepared:
             own = int(self.cfg.get("assistant_max_chars", 900)) if job.channel == "assistant" else None
-            return (self.normalizer.respell_pl(text, own) if job.lang == "pl" else text), job.lang, "prepared"
+            out = self.normalizer.respell_pl(text, own) if job.lang == "pl" else text
+            if own is not None and len(out) < len(text):
+                log.info("voice: assistant answer cut to %d chars (voice.assistant_max_chars=%d)", len(out), own)
+            return out, job.lang, "prepared"
         if job.lang == "pl" and self.translator is not None:
             try:
                 res = self.translator.translate(text, "en-pl")
@@ -339,6 +342,8 @@ class VoiceManager:
                     else self.cfg.get("max_chars_per_message", 220))
         if len(speak) > limit:
             speak = speak[:limit].rsplit(" ", 1)[0]
+            if job.channel == "assistant":
+                log.info("voice: assistant answer cut to %d chars (voice.assistant_max_chars=%d)", len(speak), limit)
         if not speak or not self.budget.allows(len(speak)):
             self._skip(pkt, "budget" if speak else "empty")
             return

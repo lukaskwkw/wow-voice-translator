@@ -384,7 +384,8 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("plan_next", r"^(?:(?:a|i|no|dobra|ok|okej|super|dzieki|zrobione|gotowe|oddane)\s+)*(?:co|a)?\s*"
                   r"(?:potem|dalej|nastepne|nastepny|kolejne|kolejny|teraz)$"),
     ("help", r"\b(co umiesz|co potrafisz|w czym (mi )?pomozesz|jakie (masz )?komendy)\b|^pomocy?$"),
-    ("stop", r"^(stop|cicho|cisza|przestan\w*|zamknij sie|wystarczy|dosc)\b"),
+    ("stop", r"^(?:(?:ej|hej|iskra|asystentko|asystent|prosze)\b[\s,]*)*"
+             r"(stop|cicho|cisza|milcz\w*|przestan\w*|zamknij sie|wystarczy|dosc)\b"),
     ("reminder_list", r"\b(jakie|ile|pokaz\w*|wymien\w*|przeczytaj)\b.*\bprzypomnie\w*\b|^przypomnienia$"),
     ("reminder_cancel", r"\b(usun\w*|anuluj\w*|skasuj\w*|wyczysc\w*|odwolaj\w*|kasuj\w*|zapomnij)\b.*\bprzypomn\w*\b"),
     ("reminder_add", r"\bprzypomn\w*\b|\bprzypominaj\w*\b"),

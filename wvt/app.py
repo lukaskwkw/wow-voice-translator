@@ -412,6 +412,22 @@ class MainWindow(QWidget):
         row.addWidget(b_del)
         row.addStretch(1)
         v.addLayout(row)
+        stop_row = QHBoxLayout()
+        stop_row.addWidget(QLabel("Klawisz przerwania odczytu:"))
+        self.stop_key = QLineEdit()
+        self.stop_key.setReadOnly(True)
+        self.stop_key.setText(str(cfg.get("voice.stop_key", "pause") or "").strip() or "—")
+        b_stop_cap = QPushButton("Ustaw")
+        b_stop_cap.clicked.connect(self.on_capture_stop_key)
+        b_stop_clear = QPushButton("Wyczyść")
+        b_stop_clear.clicked.connect(lambda: self.stop_key.setText("—"))
+        stop_row.addWidget(self.stop_key, 1)
+        stop_row.addWidget(b_stop_cap)
+        stop_row.addWidget(b_stop_clear)
+        v.addLayout(stop_row)
+        stop_note = QLabel("Działa globalnie (także gdy mówi Iskra); „—” wyłącza klawisz.")
+        stop_note.setWordWrap(True)
+        v.addWidget(stop_note)
         self.only_wow = QCheckBox("Działaj tylko, gdy okno WoW jest aktywne (zalecane)")
         self.only_wow.setChecked(bool(cfg.get("wow.only_when_wow_active", True)))
         v.addWidget(self.only_wow)
@@ -635,9 +651,21 @@ class MainWindow(QWidget):
             return
         self.test_result.setText("Naciśnij klawisz lub przycisk myszy (4/5/środkowy)…")
         self._capture_row = row
+        self._capture_stop = False
+        self.app.capture_key()
+
+    def on_capture_stop_key(self) -> None:
+        self.test_result.setText("Naciśnij klawisz lub przycisk myszy (4/5/środkowy)…")
+        self._capture_row = -1
+        self._capture_stop = True
         self.app.capture_key()
 
     def on_key_captured(self, spec: KeySpec) -> None:
+        if getattr(self, "_capture_stop", False):
+            self._capture_stop = False
+            self.stop_key.setText(keyspec_to_config(spec))
+            self.test_result.setText(f"Przypisano: {spec.describe()} – pamiętaj o „Zapisz ustawienia”.")
+            return
         row = getattr(self, "_capture_row", -1)
         if row >= 0:
             self.ptt_table.setItem(row, 0, QTableWidgetItem(keyspec_to_config(spec)))
@@ -686,6 +714,16 @@ class MainWindow(QWidget):
                 return
             bindings.append({"key": key, "channel": combo.currentText()})
         cfg.set("push_to_talk", bindings)
+        stop_key = self.stop_key.text().strip()
+        if stop_key == "—":
+            stop_key = ""
+        if stop_key:
+            try:
+                parse_key(stop_key)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Klawisz", str(exc))
+                return
+        cfg.set("voice.stop_key", stop_key)
         cfg.set("audio.device", self.mic_combo.currentData())
         cfg.set("audio.silence_rms_threshold", round(self.threshold.value(), 5))
         cfg.set("audio.input_gain_db", float(self.gain_db.value()))
@@ -1118,6 +1156,12 @@ class TranslatorApp:
                 bindings.append(Binding(parse_key(b["key"]), b.get("channel", "say")))
             except (ValueError, KeyError) as exc:
                 log.warning("bad PTT binding %s: %s", b, exc)
+        key = str(self.cfg.get("voice.stop_key", "pause") or "").strip()
+        if key and not any(b.channel == "stop" for b in bindings):
+            try:
+                bindings.append(Binding(parse_key(key), "stop"))
+            except ValueError as exc:
+                log.warning("bad stop binding %s: %s", key, exc)
         only_wow = bool(self.cfg.get("wow.only_when_wow_active", True))
         self.hotkeys = HotkeyManager(
             bindings,
@@ -1261,6 +1305,12 @@ class TranslatorApp:
                 parts.append(f"przytrzymaj {spec.describe()} → {b.get('channel', '?')} ({self.cfg.get('channels.' + b.get('channel', ''), '')})")
             except Exception:
                 parts.append(f"{b.get('key')} → {b.get('channel')} (błędny klawisz)")
+        key = str(self.cfg.get("voice.stop_key", "pause") or "").strip()
+        if key:
+            try:
+                parts.append(f"naciśnij {parse_key(key).describe()} → przerwij odczyt")
+            except ValueError:
+                pass
         return " · ".join(parts) + " · Esc w trakcie nagrywania anuluje"
 
     # ------------------------------------------------------------------ tray
@@ -1502,6 +1552,10 @@ class TranslatorApp:
             self.hud.level = self.recorder.level
 
     def _on_hotkey(self, kind: str, channel: str) -> None:
+        if channel == "stop":
+            if kind == "press" and self.voice is not None:
+                self.voice.silence()
+            return
         if not self.act_ptt.isChecked():
             return
         if self.pipeline is None:

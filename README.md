@@ -93,11 +93,12 @@ Optional:
 | hold **Caps Lock** | speak Polish → English text for **/party** |
 | hold **mouse button 5** (side button) | talk to the assistant |
 | **Esc** while speaking | cancel |
+| **Pause** | przerwij odczyt – stop the reader: Iskra's answer and any character voice (global, also while Iskra speaks) |
 | **Enter** | send the text. The app never sends anything by itself: it only pastes into the chat box. |
 
 - **Hover translations.** Hover the mouse over a chat line for a moment and the Polish translation appears above it.
 - **Confirm before inserting (optional).** With **Settings → Push-to-talk → "Pokaż tekst do edycji przed wstawieniem (Enter wstawia, Esc anuluje)"** checked, a small always-on-top box shows the whole chat line (for example `/p hello`) after push-to-talk instead of pasting it at once. **Enter** (or **Wstaw**) inserts it into the chat box, **Esc** (or **Anuluj**) throws it away; you still press Enter in WoW to send, as usual. The box counts the 255-byte limit (`translation.max_chat_chars`) and truncates anything longer when inserted. Iskra's own commands are unaffected: they already land in the chat box and run only on Enter.
-- **Settings.** Keys, microphone and other settings are in the app window. The keys react only while WoW is the active window.
+- **Settings.** Keys, microphone and other settings are in the app window. The keys react only while WoW is the active window. Under the push-to-talk table, **Klawisz przerwania odczytu** sets the global stop key (`voice.stop_key`, default `pause`; `—` turns it off).
 
 Addon commands in the game:
 
@@ -182,6 +183,7 @@ Hold **mouse button 5** and say what you want in Polish.
 | „przypomnij mi za 10 minut…”, „zanotuj, że…” | reminders by time, level or place, and notes |
 | „ile expa na godzinę?”, „brać need czy greed?” | session stats; loot roll advice |
 | game questions („jak pokonać VanCleefa?”) | answers from the local knowledge base |
+| „cicho”, „Iskra, cicho”, „milcz” | stops her answer („Iskra, cicho” works as well) |
 
 Questions like „co jeszcze mogę zrobić?”, „co jeszcze mogę zrobić po tym queście?” go to the planner: the quest journal plus QuestieDB world data through `advisor.where_next`, so she proposes what to take next - not the diary-only `quest_info` answer. The wiki/knowledge base is only a lore fallback.
 
