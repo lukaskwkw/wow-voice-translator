@@ -259,6 +259,7 @@ Questions like „co jeszcze mogę zrobić?”, „co jeszcze mogę zrobić po t
 - You can type a question straight into the overlay's input and press Enter or "Wyślij" (no push-to-talk). It uses the same game context the app already has from the addon (state, quests, chat), so nothing extra is sent to the addon. The answer shows up in the transcript and the HUD; if she prepares a command, it waits in the WoW chat box and you still press Enter to send it.
 - "Prompt" (in the overlay and the `Iskra` tab) shows exactly what was sent to the model last time: the system prompt, the recent turns and your question. It is read from memory only - nothing is written to the logs.
 - "Bez reguł" (next to the overlay's input) arms the next question to skip the local rules and Jev, so a follow-up that would otherwise turn into `quest_worth` and the like goes straight to the conversation instead. It is one-shot: it clears itself after that one question.
+- **`[` autocomplete (overlay and the `Iskra` tab input).** Type `[` and a popup lists names the app already knows: quests in your journal, turn-ins, quests available to take, every QuestieDB quest name, NPCs, zones, dungeons, items and your party members. Arrow keys pick, Enter or Tab inserts `[Name]`, Esc closes the list. Outside the brackets no popup appears and nothing is auto-inserted; the list lives in memory only and is never logged.
 - This needs no addon changes and no addon reinstall.
 
 ### Logs: where did the answer come from?

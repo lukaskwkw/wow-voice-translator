@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout
 
+from .completer import BracketCompleter
 from .history_text import render_history_html
 
 __all__ = ["HistoryOverlay", "render_history_html", "update_history_view"]
@@ -47,7 +48,7 @@ class HistoryOverlay(QDialog):
     closed = Signal()
 
     def __init__(self, items_getter, clear_callback, cfg, on_ask=None, on_skip=None, skip_pending=None,
-                 on_prompt=None, parent=None):
+                 on_prompt=None, suggestions=None, parent=None):
         super().__init__(parent)
         self._items_getter = items_getter
         self._clear_callback = clear_callback
@@ -56,6 +57,7 @@ class HistoryOverlay(QDialog):
         self._on_skip = on_skip
         self._skip_pending = skip_pending
         self._on_prompt = on_prompt
+        self._suggestions = suggestions
         self.setWindowTitle("Iskra – historia rozmów")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -71,7 +73,9 @@ class HistoryOverlay(QDialog):
         ask_row = QHBoxLayout()
         self.ask = QLineEdit()
         self.ask.setPlaceholderText("Napisz do Iskry…")
+        self.ask.setToolTip("Wpisz [ aby wybrać quest, NPC lub miejsce z danych gry")
         self.ask.returnPressed.connect(self._send)
+        self._completer = BracketCompleter(self.ask, suggestions, self) if suggestions is not None else None
         b_send = QPushButton("Wyślij")
         b_send.clicked.connect(self._send)
         self.b_skip = QPushButton("Bez reguł")
@@ -130,10 +134,14 @@ class HistoryOverlay(QDialog):
         QGuiApplication.clipboard().setText(cursor.selection().toPlainText())
 
     def _send(self) -> None:
+        if self._completer is not None and (self._completer.popup_visible() or self._completer.completion_pending()):
+            return
         text = self.ask.text().strip()
         if not text:
             return
         self.ask.clear()
+        if self._completer is not None:
+            self._completer.hide_popup()
         if self._on_ask is None:
             return
         try:

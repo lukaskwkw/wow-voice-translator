@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from . import __version__, protocol
 from .audio import AudioRecorder, analyze, dbfs, input_gain, trim_and_normalize
 from .chat_insert import ChatInserter, build_chat_line, set_clipboard_text
+from .completer import BracketCompleter
 from .config import ROOT, Config
 from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
@@ -49,6 +50,7 @@ from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
 from .pipeline import HistoryItem, PushToTalkPipeline
 from .signal_reader import SignalReader
+from .suggest import build_suggestions
 from .wow_window import WowWindow, WowWindowTracker
 
 log = logging.getLogger("wvt.app")
@@ -250,6 +252,17 @@ class MainWindow(QWidget):
         self.assistant_history.setReadOnly(True)
         self.assistant_history.setOpenExternalLinks(False)
         lay.addWidget(self.assistant_history, 1)
+        ask_row = QHBoxLayout()
+        self.ask_history = QLineEdit()
+        self.ask_history.setPlaceholderText("Napisz do Iskry… ([ = podpowiedzi)")
+        self.ask_history.setToolTip("Wpisz [ aby wybrać quest, NPC lub miejsce z danych gry")
+        self.ask_history.returnPressed.connect(self.send_history_question)
+        b_send = QPushButton("Wyślij")
+        b_send.clicked.connect(self.send_history_question)
+        ask_row.addWidget(self.ask_history, 1)
+        ask_row.addWidget(b_send)
+        lay.addLayout(ask_row)
+        self._history_completer = BracketCompleter(self.ask_history, self.app.suggestion_items, self)
         row = QHBoxLayout()
         b_clear = QPushButton("Wyczyść historię")
         b_clear.clicked.connect(self.on_clear_assistant_history)
@@ -265,6 +278,19 @@ class MainWindow(QWidget):
         self._history_timer = timer
         self.refresh_assistant_history()
         return w
+
+    def send_history_question(self) -> None:
+        """Send what is typed under the Iskra history tab (Enter in the popup does not send)."""
+        c = self._history_completer
+        if c is not None and (c.popup_visible() or c.completion_pending()):
+            return
+        text = self.ask_history.text().strip()
+        if not text:
+            return
+        self.ask_history.clear()
+        if c is not None:
+            c.hide_popup()
+        self.app._ask_from_history(text)
 
     def on_clear_assistant_history(self) -> None:
         self.app._clear_assistant_history()
@@ -778,6 +804,8 @@ class TranslatorApp:
         self._confirm_dialog = None
         self._assistant_confirm_dialog = None
         self._prompt_dialog = None
+        self._suggest_cache = None
+        self._suggest_cache_at = 0.0
         self.hover_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wvt-hover")
         self._hover_current = None
         self._hover_window: Optional[WowWindow] = None
@@ -890,6 +918,7 @@ class TranslatorApp:
                                            journal_path=(ROOT / journal) if journal else None,
                                            remote_embedder=remote_vectors)
                 self.assistant.start()
+                self._suggest_cache_at = 0.0
                 self.pipeline.assistant = self.assistant
                 self.pipeline.lexicon = self.assistant.lexicon  # names of the moment: Whisper, fixes, translator
                 threading.Thread(target=self._load_knowledge, name="wvt-kb", daemon=True).start()
@@ -1002,6 +1031,7 @@ class TranslatorApp:
 
             if WORLD_PATH.exists():
                 self.world = World.load(WORLD_PATH)
+                self._suggest_cache_at = 0.0
                 self.instances = load_instances(INSTANCES_PATH)
                 log.info("world data: %d quests, %d NPCs, %d instances", len(self.world.quests), len(self.world.npcs),
                          len(self.instances))
@@ -1236,6 +1266,23 @@ class TranslatorApp:
             self.hover.hide()
 
     # ------------------------------------------------------------------ Iskra history overlay
+    def suggestion_items(self) -> list:
+        """Names for the ``[`` popup from the data already loaded, cached for 10 s."""
+        now = time.monotonic()
+        if self._suggest_cache is not None and now - self._suggest_cache_at < 10.0:
+            return self._suggest_cache
+        if self.assistant is None:
+            return []
+        try:
+            items = build_suggestions(self.assistant.quests, self.world, self.assistant._player(),
+                                      self.assistant.state)
+        except Exception:
+            log.exception("building bracket suggestions failed")
+            items = []
+        self._suggest_cache = items
+        self._suggest_cache_at = now
+        return items
+
     def _ensure_history_overlay(self) -> HistoryOverlay:
         if self.history_overlay is None:
             self.history_overlay = HistoryOverlay(
@@ -1243,7 +1290,8 @@ class TranslatorApp:
                 self._clear_assistant_history, self.cfg,
                 on_ask=self._ask_from_history,
                 on_skip=self._arm_skip_rules, skip_pending=self._skip_pending,
-                on_prompt=self.show_last_prompt)
+                on_prompt=self.show_last_prompt,
+                suggestions=self.suggestion_items)
             self.history_overlay.closed.connect(self._on_history_closed)
         return self.history_overlay
 
