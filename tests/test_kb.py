@@ -208,6 +208,8 @@ def tables():
           "exclusiveTo": 16, "zoneOrSort": 17, "nextQuestInChain": 22, "specialFlags": 24}
     nk = {"name": 1, "minLevel": 4, "maxLevel": 5, "spawns": 7, "zoneID": 9, "friendlyToFaction": 13, "subName": 14,
           "npcFlags": 15}
+    ik = {"name": 1, "npcDrops": 2, "objectDrops": 3, "startQuest": 5, "itemLevel": 9, "requiredLevel": 10,
+          "class": 12, "subClass": 13, "vendors": 14, "relatedQuests": 15}
     quests = {
         1: {1: "Report to Gryan", 2: {1: {1: 100}}, 3: {1: {1: 101}}, 4: 10, 5: 12, 6: 1 + 4, 17: 40},
         2: {1: "The Defias Brotherhood", 2: {1: {1: 101}}, 3: {1: {1: 101}}, 4: 12, 5: 14, 13: {1: 1}, 17: 40,
@@ -223,9 +225,13 @@ def tables():
         102: {1: "Defias Pillager", 4: 14, 5: 15, 7: {40: {1: {1: 45.0, 2: 70.0}}}, 9: 40},
         103: {1: "Grunt", 7: {40: {1: {1: 30.0, 2: 30.0}}}, 13: "H"},
         104: {1: "Thor", 7: {40: {1: {1: 56.5, 2: 52.6}}}, 13: "A", 14: "Gryphon Master", 15: 8},
+        105: {1: "Fish Vendor", 13: "A"},
     }
-    return {"keys": {"Quest": qk, "Npc": nk, "Object": {"name": 1}, "Item": {"name": 1}},
-            "data": {"Quest": quests, "Npc": npcs, "Object": {}, "Item": {}},
+    return {"keys": {"Quest": qk, "Npc": nk, "Object": {"name": 1}, "Item": ik},
+            "data": {"Quest": quests, "Npc": npcs, "Object": {900: {1: "School of Fish"}},
+                     "Item": {500: {1: "Oily Blackmouth", 2: {1: 102}, 3: {1: 900}, 5: {1: 1}, 9: 15, 10: 0,
+                                    12: 5, 13: 0, 14: {1: 105}, 15: {1: 2}},
+                              501: {1: "<NYI> Test Item", 9: 1, 10: 0, 12: 5, 13: 0}}},
             "enums": {"zoneIDs": {"WESTFALL": 40, "UN_GORO_CRATER": 490}}}
 
 
@@ -241,6 +247,35 @@ def test_world_keeps_real_quests_and_the_npcs_they_need():
     assert w.area_name(40) == "Westfall" and pretty_zone("UN_GORO_CRATER") == "Un'Goro Crater"
     assert faction_of_mask(1 + 4) == "A" and faction_of_mask(2) == "H" and faction_of_mask(0) == ""
     assert "Starts at: Gryan Stoutmantle - Westfall (56, 48)" in quest_text(w, 2)
+
+
+def test_world_all_items_index_and_item_record():
+    w = world()
+    rec = w.item_record("Oily Blackmouth")
+    assert rec["il"] == 15 and rec["c"] == 5
+    assert rec["v"] == ["Fish Vendor"] and rec["nd"] == ["Defias Pillager"] and rec["od"] == ["School of Fish"]
+    assert rec["sq"] == ["Report to Gryan"] and rec["rq"] == ["The Defias Brotherhood"]
+    assert w.item_record("where is oily blackmouth") is rec  # contained name
+    assert w.item_record("no such item") is None
+    assert 500 not in w.items  # the quest-items dict is unchanged
+    assert 501 not in w.all_items  # junk names are filtered
+    assert 105 not in w.npcs and 900 not in w.objects  # all_items adds no need_npc/need_obj entries
+
+
+def test_world_loads_all_items_from_a_data_dict():
+    data = {"all_items": {"6358": {"n": "Oily Blackmouth", "il": 15, "c": 5, "od": ["School of Fish"]}},
+            "zones": {}}
+    w = World(data)
+    assert w.all_items[6358]["il"] == 15
+    assert w.item_record("oily blackmouth") == {"n": "Oily Blackmouth", "il": 15, "c": 5, "od": ["School of Fish"]}
+    assert w.item_record("Oily Blackmouth (raw item)") is not None
+    assert w.item_record("Oily") is None
+
+
+def test_world_without_all_items_still_loads():
+    w = World({"quests": {}, "npcs": {}, "objects": {}, "items": {}, "zones": {}})
+    assert w.all_items == {}
+    assert w.item_record("Oily Blackmouth") is None
 
 
 def test_quest_availability_follows_questie_rules():

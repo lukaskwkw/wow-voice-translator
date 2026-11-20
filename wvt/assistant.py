@@ -331,9 +331,16 @@ _ITEM_NOUN = (r"(?:kij\w*|kostur\w*|lask\w*|miecz\w*|topor\w*|siekier\w*|sztylet
               r"|zbroj\w*|szat\w*|kurtk\w*|tunik\w*|spodni\w*|nogawic\w*|portk\w*|but|buty|butow|butach|rekawic\w*"
               r"|karwasz\w*|bransolet\w*|pas|pasa|pasek|paska|pierscien\w*|naszyjnik\w*|amulet\w*|plaszcz\w*"
               r"|peleryn\w*|naramiennik\w*|bron\w*|item\w*|przedmiot\w*|rzecz\w*|buzdygan\w*|maczug\w*|bulaw\w*"
-              r"|mlot\w*|talizman\w*|blyskotk\w*|pancerz\w*)")
+              r"|mlot\w*|talizman\w*|blyskotk\w*|pancerz\w*|ryb\w*|material\w*|odczynnik\w*|skladnik\w*|reagent\w*"
+              r"|przepis\w*|jedzenie|napoj\w*|zio[łl]\w*|kwiat\w*|rud[ay]\w*|sztab\w*|tkanin\w*|skor\w*|sprzet\w*)")
 _ITEM_Q = (r"(?:lepsz\w*|gorsz\w*|slabsz\w*|mocniejsz\w*|warto|zaloz\w*|zakladac|ubrac|dobr\w*|dla mnie|sprzeda\w*"
            r"|do czego|co to|co z|uzyw\w*|nosic|oplaca\w*|ulepszeni\w*|upgrade\w*|przyda\w*)")
+# asks the LLM never to guess recipe, price or use facts (assistant.item_help)
+_ITEM_COMPARE_RE = re.compile(r"\b(lepsz\w*|gorsz\w*|wart\w*|wiecej|mniej|porown\w*|zamiast|oplaca\w*)\b")
+_ITEM_QUESTION_RE = re.compile(
+    r"\b(warto|warty|warta|lepsz\w*|gorsz\w*|co (z|moge|mozna|zrobic)|do czego|sprzeda\w*|zachow\w*|co to|czym jest"
+    r"|gdzie (kup|zdoby|wypada)|skad|kto sprzedaje|jak zdobyc|gdzie wypada)\b")
+_QUEST_WORD_RE = re.compile(r"\b(quest\w*|zadani\w*|misj\w*|dziennik\w*)\b")
 # kinds of items by their Polish names: (words, class, subclasses, equip locations)
 _ITEM_KINDS = (
     (r"\b(kij\w*|kostur\w*|lask\w*)\b", 2, {10}, ()),
@@ -386,7 +393,6 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("note_add", r"^(?:(?:ej|hej|iskra|prosze|i)\s+)*(zanotuj|zapisz|zapamietaj|notatka|dodaj notatke)\w*\b"),
     ("item_about", rf"^(?!.*\b(quest\w*|kwest\w*|zadani\w*|gdzie|kupi\w*|kupic)\b)"
                    rf"(?:(?=.*\b{_ITEM_NOUN}\b).*\b{_ITEM_Q}\b|(?:a\s+)?co to (?:jest )?za\b)"),
-    ("quest_worth", r"\b(warto|oplaca sie|oplacal\w*|ocen\w*)\b|\blancuch\w*\b|\bco (dalej|potem) (w|po) (tym )?quesc\w*\b"),
     ("stats_reset", r"\b(zresetuj\w*|wyzeruj\w*|resetuj\w*|zeruj\w*)\b.*\b(statystyk\w*|licznik\w*|sesj\w*)\b"),
     ("stats", r"\b(na godzine|na godz|tempo|statystyk\w*|sesj\w*)\b|\bkiedy\b.*\b(level\w*|lewel\w*|poziom\w*|lvl)\b"
               r"|\bile\b.*\b(zarobil\w*|zdobyl\w*|wbil\w*|nabil\w*|uzbieral\w*|wyexpil\w*|zarabiam\w*)\b"),
@@ -450,6 +456,7 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("bags", r"\b(ile|miejsc\w*|woln\w*|peln\w*|zapchan\w*|slot\w*)\b.*\b(torb\w*|plecak\w*|ekwipunk\w*|bagach|bagi)\b"
              r"|\b(torb\w*|plecak\w*|ekwipunk\w*)\b.*\b(miejsc\w*|woln\w*|peln\w*|zapchan\w*)\b"),
     ("members", r"\b(kto|kogo)\b.*\b(party|grup\w*|druzyn\w*|raid\w*)\b|\bsklad\b"),
+    ("quest_worth", r"\b(warto|oplaca sie|oplacal\w*|ocen\w*)\b|\blancuch\w*\b|\bco (dalej|potem) (w|po) (tym )?quesc\w*\b"),
     # quests (after gold / xp / bags, which also start with "ile")
     ("quest_turnin", r"\b(co|ktore|ktory|jakie|czy)\b.*\b(oddac|oddania|oddam|skonczon\w*|ukonczon\w*|gotow\w*"
                      r"|zrobion\w*)\b|\bgdzie\b.*\boddac\b"),
@@ -1076,7 +1083,11 @@ class Assistant:
             if reply:
                 self._remember(rest or text, reply)
         else:
-            local = Intent("chat") if force_chat else parse_intent(text)
+            if force_chat:
+                local = Intent("chat")
+            else:
+                item_kind = self._item_intent(text)
+                local = Intent(item_kind) if item_kind is not None else parse_intent(text)
             local_kind = local.kind
             intent = local
             route = "rules" if local_kind != "chat" else "chat"
@@ -1156,6 +1167,9 @@ class Assistant:
         extra = str(self.cfg.get("assistant.persona_extra", "") or "")
         system = PERSONA.format(name=self.name, extra=(" " + extra) if extra else "") + \
             "\nFakty z wybranych reguł (używaj tylko ich, nie wymyślaj nowych faktów):\n" + facts
+        if self.cfg.get("assistant.item_help", True):
+            system += ("\nNie dodawaj receptur, cen ani zastosowań, których nie ma w faktach; "
+                       "jeśli czegoś nie ma, powiedz to wprost.")
         messages = [{"role": "system", "content": system}, *self._recent_history(),
                     {"role": "user", "content": rest}]
         out = self._llm_text(messages, max_tokens=320, temperature=0.3,
@@ -1336,6 +1350,10 @@ class Assistant:
         if k == "item_about":
             answer = self._item_about(polish)
             return (answer if answer is not None else (self._knowledge(polish) or self._chat(polish))), ""
+        if k == "item_compare":
+            if self.cfg.get("assistant.item_help", True):
+                return self._item_compare(polish)
+            return "Rozszerzona pomoc o przedmiotach jest wyłączona w Ustawieniach.", ""
         if k == "bag_list":
             return self._bag_list(), ""
         if k == "bag_junk":
@@ -2200,25 +2218,161 @@ class Assistant:
                 cands.sort(key=lambda o: (-(o.looted_at or 0), order.get(fold(o.name), 99)))
         return cands, False, sure
 
+    def _item_names_in(self, text: str, include_topic: bool = True) -> list[str]:
+        """Item names the question names: brackets, corrected names, your bags, the world index, the item topic."""
+        world = self.world_getter()
+        folded = fold(text or "")
+        raw: list[str] = list(re.findall(r"\[([^\]]+)\]", text or ""))
+        for e in self.last_correction.found:
+            if (e.kind == "item" or e.source in ("bag", "loot")) and getattr(e, "name", ""):
+                raw.append(e.name)
+        for it in self.bags.items:
+            if len(it.name) >= 4 and fold(it.name) in folded:
+                raw.append(it.name)
+        names_map = getattr(world, "_all_item_names", {}) if world is not None else {}
+        for key in names_map:
+            if len(key) >= 5 and key in folded:
+                raw.append(key)
+        if include_topic:
+            t = self._topic_now()
+            if t is not None and t.kind == "item" and t.name:
+                raw.append(t.name)
+        out: list[str] = []
+        seen: set[str] = set()
+        for name in raw:
+            canon = name
+            rec = None
+            if world is not None and hasattr(world, "item_record"):
+                try:
+                    rec = world.item_record(name)
+                except Exception:
+                    rec = None
+            if isinstance(rec, dict) and rec.get("n"):
+                canon = rec["n"]
+            key = fold(canon).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(canon)
+            if len(out) >= 4:
+                break
+        return out
+
+    def _item_intent(self, text: str) -> Optional[str]:
+        """item_compare / item_about when the question names an item and asks about it, else None."""
+        if not self.cfg.get("assistant.item_help", True):
+            return None
+        folded = fold(text or "")
+        explicit = self._item_names_in(text, include_topic=False)
+        if not explicit and _QUEST_WORD_RE.search(folded):
+            return None  # "czy warto robić ten quest?" stays a quest question, even after an item talk
+        names = explicit or self._item_names_in(text)
+        if not names:
+            return None
+        if len(names) >= 2 and _ITEM_COMPARE_RE.search(folded):
+            return "item_compare"
+        if _ITEM_QUESTION_RE.search(folded):
+            return "item_about"
+        return None
+
+    _ITEM_CLASS_LABEL = {0: "jedzenie lub napój", 2: "broń", 4: "pancerz", 5: "odczynnik", 7: "materiał",
+                         9: "przepis", 12: "przedmiot questowy"}
+    _ITEM_QUALITY_LABEL = {0: "szary", 1: "biały", 2: "zielony", 3: "niebieski", 4: "fioletowy", 5: "legendarny"}
+
+    def _item_facts(self, name: str, own: Optional["OwnItem"] = None) -> str:
+        """The item's facts as lines: kind, levels, your copy, vendors, drops, quests. No LLM, no prices."""
+        world = self.world_getter()
+        record = None
+        if world is not None and hasattr(world, "item_record"):
+            try:
+                record = world.item_record(name)
+            except Exception:
+                record = None
+        if not isinstance(record, dict):
+            record = None
+        if record is None and own is None:
+            self._sources = [f"item facts: {name}"]
+            self._set_topic("item", name)
+            return "Nie mam tego przedmiotu w bazie świata; nie znam receptur ani cen."
+        shown = (record.get("n") if record else "") or name
+        p = self._player()
+        cls = record.get("c") if record else (own.class_id if own is not None else None)
+        lines = [shown]
+        label = self._ITEM_CLASS_LABEL.get(cls, f"klasa {cls}") if isinstance(cls, int) else ""
+        if label:
+            lines.append(f"Rodzaj: {label}.")
+        level = record.get("il") if record else (own.loot.item_level if own is not None and own.loot else None)
+        if isinstance(level, int) and level > 0:
+            lines.append(f"Poziom przedmiotu: {level}.")
+        needed = record.get("rl") if record else (own.loot.min_level if own is not None and own.loot else None)
+        if isinstance(needed, int) and needed > 0:
+            lines.append(f"Wymagany poziom: {needed}.")
+        if own is not None:
+            quality = self._ITEM_QUALITY_LABEL.get(own.quality, f"jakość {own.quality}")
+            lines.append(f"Jakość: {quality}. Masz: {own.count}.")
+        if record:
+            vendors = record.get("v") or []
+            if vendors:
+                lines.append("Sprzedawcy: " + polish_list(list(vendors)[:5]) + ".")
+            drops = list(record.get("nd") or []) + list(record.get("od") or [])
+            if drops:
+                lines.append("Dropi: " + polish_list(drops[:6]) + ".")
+            quests = list(record.get("sq") or []) + list(record.get("rq") or [])
+            if quests:
+                lines.append("Questy: " + polish_list(list(dict.fromkeys(quests))[:5]) + ".")
+        if own is not None and own.loot is not None:
+            lines.append(item_verdict(own.loot, p.class_id, p.level))
+        lines.append("Brak danych o recepturach i reagentach.")
+        lines.append("Brak danych o cenach rynkowych.")
+        self._sources = [f"item facts: {shown}"]
+        self._set_topic("item", shown)
+        return "\n".join(lines)
+
+    def _item_compare(self, text: str) -> tuple[str, str]:
+        """Two items side by side from their facts; never from market prices (there are none)."""
+        names = self._item_names_in(text)
+        if len(names) < 2:
+            return "Podaj dwa przedmioty, np. {item_compare} [A] i [B].", ""
+        first, second = names[0], names[1]
+        a = self._item_facts(first)
+        b = self._item_facts(second)
+        self._sources = [f"item facts: {first}", f"item facts: {second}"]
+        self._set_topic("item", second)
+        return (f"{a} {b} Nie mam cen rynkowych, więc nie powiem, który jest więcej warty."), ""
+
     def _item_about(self, text: str) -> Optional[str]:
         """None: not clearly about one of your items ("co to za miejsce?") - her LLM answers from the facts."""
         cands, named, sure = self._find_own(text)
-        if not sure:
-            return None
-        if not cands:
+        if not self.cfg.get("assistant.item_help", True):
+            if not sure:
+                return None
+            if not cands:
+                if not self.bags.known and not self._items:
+                    return "Jeszcze nie widzę twoich toreb ani łupów. Daj mi chwilę po zalogowaniu albo zrób /reload."
+                return "Nie widzę takiego przedmiotu w twoich łupach ani w torbach."
+            o = cands[0]
+            p = self._player()
+            answer = item_verdict(o.loot, p.class_id, p.level) if o.loot is not None else self._item_plain(o)
+            same = (o.class_id, o.subclass_id, o.equip_loc)  # "masz też" only for items of the same kind
+            others = [c.name for c in cands[1:]
+                      if c.name != o.name and (c.class_id, c.subclass_id, c.equip_loc) == same][:2]
+            if others and not named:
+                answer += f" Jeśli chodziło ci o inny, masz też {polish_list(others)}."
+            self._sources = [f"own item: {o.name}" + (" (stats)" if o.loot is not None else "")]
+            self._set_topic("item", o.name)
+            return answer
+        if cands and (named or sure):
+            return self._item_facts(cands[0].name, cands[0])
+        if sure and not cands:
             if not self.bags.known and not self._items:
                 return "Jeszcze nie widzę twoich toreb ani łupów. Daj mi chwilę po zalogowaniu albo zrób /reload."
             return "Nie widzę takiego przedmiotu w twoich łupach ani w torbach."
-        o = cands[0]
-        p = self._player()
-        answer = item_verdict(o.loot, p.class_id, p.level) if o.loot is not None else self._item_plain(o)
-        same = (o.class_id, o.subclass_id, o.equip_loc)  # "masz też" only for items of the same kind
-        others = [c.name for c in cands[1:] if c.name != o.name and (c.class_id, c.subclass_id, c.equip_loc) == same][:2]
-        if others and not named:
-            answer += f" Jeśli chodziło ci o inny, masz też {polish_list(others)}."
-        self._sources = [f"own item: {o.name}" + (" (stats)" if o.loot is not None else "")]
-        self._set_topic("item", o.name)
-        return answer
+        names = self._item_names_in(text)
+        if not names:
+            return None
+        name = names[0]
+        own = next((o for o in self._own_items() if fold(o.name) == fold(name)), None)
+        return self._item_facts(name, own)
 
     def _item_plain(self, o: "OwnItem") -> str:
         """An item without stats: what it is for."""

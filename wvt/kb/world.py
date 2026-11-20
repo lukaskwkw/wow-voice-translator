@@ -228,6 +228,45 @@ def build_world(tables: dict, support: dict, blacklist: Iterable[int] = (), even
             need_npc.update(vendors)
         items[str(iid)] = it
 
+    # every item, not only the quest ones: name queries such as "where is Oily Blackmouth" need the full index.
+    # Vendors, drops and quest links are stored as names (resolved here), so the app needs no extra tables.
+    def _ref_names(ids: list[int], table: dict, keys: dict) -> list[str]:
+        out: list[str] = []
+        for rid in ids:
+            r = table.get(rid)
+            name = g(r, keys, "name") if r else None
+            if isinstance(name, str) and name.strip() and name.strip() not in out:
+                out.append(name.strip())
+        return out
+
+    all_items: dict[str, dict] = {}
+    for iid, r in D["Item"].items():
+        name = g(r, ik, "name")
+        if not isinstance(iid, int) or not isinstance(name, str) or not name.strip() or JUNK_NAME.search(name):
+            continue
+        it: dict[str, Any] = {"n": name.strip()}
+        for key, field in (("il", "itemLevel"), ("rl", "requiredLevel"), ("c", "class"), ("sc", "subClass")):
+            v = g(r, ik, field)
+            if isinstance(v, (int, float)):
+                it[key] = int(v)
+        vendors = _ref_names(_ids(g(r, ik, "vendors"))[:8], D["Npc"], nk)
+        if vendors:
+            it["v"] = vendors
+        nd = _ref_names(_ids(g(r, ik, "npcDrops"))[:10], D["Npc"], nk)
+        if nd:
+            it["nd"] = nd
+        od = _ref_names(_ids(g(r, ik, "objectDrops"))[:10], D["Object"], ok)
+        if od:
+            it["od"] = od
+        sq = [n for n in _ref_names(_ids(g(r, ik, "startQuest"))[:5], D["Quest"], qk) if not JUNK_NAME.search(n)]
+        if sq:
+            it["sq"] = sq
+        rq = [n for n in _ref_names(_ids(g(r, ik, "relatedQuests"))[:8], D["Quest"], qk)
+              if not JUNK_NAME.search(n)]
+        if rq:
+            it["rq"] = rq
+        all_items[str(iid)] = it
+
     npcs: dict[str, dict] = {}
     for nid, r in D["Npc"].items():
         name = g(r, nk, "name")
@@ -294,6 +333,7 @@ def build_world(tables: dict, support: dict, blacklist: Iterable[int] = (), even
             names.setdefault(str(area), d[1])
 
     world = {"version": 1, "source": source, "quests": quests, "npcs": npcs, "objects": objects, "items": items,
+             "all_items": all_items,
              "zones": {"names": names, "map": {str(a): m for a, m in support.get("area_to_map", {}).items()},
                        "dungeons": dungeons}}
     world["zones"].update(_zone_stats(world))
@@ -385,6 +425,7 @@ class World:
         self.npcs: dict[int, dict] = {int(k): v for k, v in data.get("npcs", {}).items()}
         self.objects: dict[int, dict] = {int(k): v for k, v in data.get("objects", {}).items()}
         self.items: dict[int, dict] = {int(k): v for k, v in data.get("items", {}).items()}
+        self.all_items: dict[int, dict] = {int(k): v for k, v in data.get("all_items", {}).items()}
         z = data.get("zones", {})
         self.names: dict[int, str] = {int(k): v for k, v in z.get("names", {}).items()}
         self.area_map: dict[int, int] = {int(k): int(v) for k, v in z.get("map", {}).items() if v}
@@ -403,6 +444,9 @@ class World:
         self._item_names: dict[str, list[int]] = defaultdict(list)
         for iid, it in self.items.items():
             self._item_names[fold(it["n"])].append(iid)
+        self._all_item_names: dict[str, list[int]] = defaultdict(list)
+        for iid, it in self.all_items.items():
+            self._all_item_names[fold(it["n"])].append(iid)
 
     @classmethod
     def load(cls, path: Path) -> "World":
@@ -569,6 +613,23 @@ class World:
                 if close:
                     return list(self._item_names[close[0]])
         return []
+
+    def item_record(self, name: str) -> Optional[dict]:
+        """The ``all_items`` record for an item name: the exact folded name first, then the longest item
+        name contained in the query ("what does Oily Blackmouth sell for" finds Oily Blackmouth)."""
+        key = fold(name or "").strip()
+        if not key:
+            return None
+        hits = self._all_item_names.get(key)
+        if hits:
+            return self.all_items[hits[0]]
+        words = re.findall(r"[a-z0-9']+", key)
+        for n in range(min(6, len(words)), 0, -1):
+            grams = [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
+            grams = [g for g in grams if g in self._all_item_names and (n > 1 or len(g) >= 5)]
+            if grams:
+                return self.all_items[self._all_item_names[max(grams, key=len)][0]]
+        return None
 
     def find_quests(self, query: str) -> list[int]:
         key = fold(query).strip(" ?!.")

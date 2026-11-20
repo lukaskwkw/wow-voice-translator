@@ -884,10 +884,13 @@ def test_the_staff_you_found_is_compared_with_what_you_wear():
     a, voice, llm = carrying_assistant()
     assert not any("Wooly Mittens" in t for t, *_ in voice.said)  # the bag scan itself is never commented on
     reply, line = a.handle("czy ten kij, który znalazłem, jest lepszy?")
-    assert reply == "Gnarled Short Staff, kostur. Lepsze niż Worn Staff: plus 3 intelektu i plus 3 ducha. Załóż."
+    assert reply.startswith("Gnarled Short Staff\nRodzaj: broń.\nPoziom przedmiotu: 12.\nWymagany poziom: 8.")
+    assert "Lepsze niż Worn Staff: plus 3 intelektu i plus 3 ducha. Załóż." in reply
+    assert "Brak danych o cenach rynkowych." in reply
     assert line == "" and not llm.calls
     reply, _ = a.handle("a te rękawice są dobre?")  # a wearable from the bag scan: stats, never commented on
-    assert reply.startswith("Wooly Mittens, rękawice, materiał. Nie ma statystyk, które przydają się magowi.")
+    assert reply.startswith("Wooly Mittens\nRodzaj: pancerz.")
+    assert "Nie ma statystyk, które przydają się magowi." in reply
     assert a.handle("czy ten miecz jest lepszy?")[0] == "Nie widzę takiego przedmiotu w twoich łupach ani w torbach."
 
 
@@ -901,6 +904,90 @@ def test_the_bags_are_listed_counted_and_the_junk_named():
     assert a.handle("ile mam linen cloth?")[0] == "Masz 12 sztuk Linen Cloth."
     b, *_ = make_assistant()
     assert b.handle("co mam w plecaku?")[0].startswith("Jeszcze nie widzę twoich toreb.")
+
+
+class FakeItemWorld:
+    """Just enough of World for item facts: all_items, the folded index and item_record."""
+
+    def __init__(self):
+        self.all_items = {
+            1: {"n": "Oily Blackmouth", "c": 5, "il": 15, "rl": 0, "v": ["Jansen Underwood"],
+                "nd": ["Murloc"], "od": ["School of Fish"], "sq": ["The Fishing Hole"]},
+            2: {"n": "Linen Cloth", "c": 7, "il": 5, "rl": 0, "nd": ["Kobold Worker"]},
+        }
+        self._all_item_names = {"oily blackmouth": [1], "linen cloth": [2]}
+
+    def item_record(self, name):
+        hits = self._all_item_names.get(" ".join((name or "").lower().split()))
+        return self.all_items[hits[0]] if hits else None
+
+
+def item_assistant(**cfg_kw):
+    a, _ins, _ui, _voice, llm = make_assistant()
+    a.cfg.update(cfg_kw)
+    world = FakeItemWorld()
+    a.world_getter = lambda: world
+    return a, llm
+
+
+def test_item_help_routes_item_questions_and_leaves_quests_alone():
+    a, _ = item_assistant()
+    assert a._item_intent("co jest lepsze [Oily Blackmouth] czy [Linen Cloth]?") == "item_compare"
+    assert a._item_intent("czy warto zachować [Oily Blackmouth]?") == "item_about"
+    assert a._item_intent("czy warto robić ten quest?") is None
+
+
+def test_an_item_topic_does_not_steal_a_quest_question():
+    a, _ = item_assistant()
+    a._set_topic("item", "Oily Blackmouth")
+    assert a._item_intent("czy warto robić ten quest?") is None
+    a.handle("czy warto robić ten quest?")
+    assert a.transcript[0]["intent"] == "quest_worth"
+
+
+def test_item_facts_name_kind_level_and_missing_recipes_and_prices():
+    a, _ = item_assistant()
+    facts = a._item_facts("Oily Blackmouth")
+    assert "Oily Blackmouth" in facts and "odczynnik" in facts
+    assert "Poziom przedmiotu: 15." in facts
+    assert "Brak danych o recepturach i reagentach." in facts
+    assert "Brak danych o cenach rynkowych." in facts
+
+
+def test_item_compare_shows_both_facts_without_market_prices():
+    a, _ = item_assistant()
+    text, line = a._item_compare("co jest lepsze [Oily Blackmouth] czy [Linen Cloth]?")
+    assert line == ""
+    assert "Oily Blackmouth" in text and "Linen Cloth" in text
+    assert "Nie mam cen rynkowych, więc nie powiem, który jest więcej warty." in text
+
+
+def test_handle_routes_two_items_to_item_compare_without_the_llm():
+    a, llm = item_assistant()
+    reply, line = a.handle("co jest lepsze [Oily Blackmouth] czy [Linen Cloth]?")
+    assert line == "" and llm.calls == []
+    assert a.transcript[0]["intent"] == "item_compare"
+    assert a.transcript[0]["route"] == "rules"
+    assert "Oily Blackmouth" in reply and "Linen Cloth" in reply
+
+
+def test_item_help_off_keeps_old_behavior_and_hides_the_compare():
+    a, _ = item_assistant(**{"assistant.item_help": False})
+    assert a._item_intent("co jest lepsze [Oily Blackmouth] czy [Linen Cloth]?") is None
+    reply, _ = a._run_directives(["item_compare"], "Oily Blackmouth i Linen Cloth", False)
+    assert reply == "Rozszerzona pomoc o przedmiotach jest wyłączona w Ustawieniach."
+
+
+def test_item_directive_adds_facts_and_the_no_guess_guard():
+    a, llm = item_assistant()
+    a.handle("{item_about} [Oily Blackmouth] co z tym?")
+    system = llm.calls[-1][0]["content"]
+    assert "Oily Blackmouth" in system and "Brak danych o recepturach" in system
+    assert "Nie dodawaj receptur, cen ani zastosowań, których nie ma w faktach" in system
+
+
+def test_quest_worth_text_still_parses_as_a_quest():
+    assert parse_intent("czy warto robić ten quest?").kind == "quest_worth"
 
 
 def test_a_misheard_quest_name_still_finds_the_quest(tmp_path):
