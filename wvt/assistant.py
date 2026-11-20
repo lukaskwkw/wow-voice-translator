@@ -391,6 +391,9 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("note_list", r"\b(jakie|co|pokaz\w*|przeczytaj|wymien\w*)\b.*\b(notatk\w*|zanotowal\w*|zapisal\w*)\b"),
     ("note_done", r"\b(usun\w*|skasuj\w*|wyczysc\w*|odhacz\w*|wykresl\w*)\b.*\bnotatk\w*\b|^(zrobione|zalatwione|gotowe)\b"),
     ("note_add", r"^(?:(?:ej|hej|iskra|prosze|i)\s+)*(zanotuj|zapisz|zapamietaj|notatka|dodaj notatke)\w*\b"),
+    ("gear_next_world",
+     r"\b(cala|calym|caly|swiat\w*|swiec\w*|world)\b.*\b(upgrade|ulepsz\w*|lepsz\w*|gear|sprzet|item\w*|ekwipunk\w*)\b"
+     r"|\b(upgrade|ulepsz\w*|lepsz\w*|gear|sprzet)\b.*\b(cala|calym|caly|swiat\w*|swiec\w*|world)\b"),
     ("gear_next", r"\bupgrade\b|\bulepsz\w*\b"
                   r"|\b(lepsz\w*|now\w*)\b.*\b(sprzet|gear|item\w*|ekwipunk\w*)\b"
                   r"|\b(gdzie|jakie|co|ktore)\b.*\bquest\w*\b.*\b(nagrod\w*|sprzet|gear|item\w*|ekwipunk\w*|ulepsz\w*)\b"
@@ -1342,6 +1345,10 @@ class Assistant:
                 return "Nie było czego odhaczać.", ""
             return self._v("Odhaczone.", "Wykreślone, brawo ty.", "Załatwione, skreślam.") + \
                 (f" Usunęłam {len(gone)} notatki." if len(gone) > 1 else ""), ""
+        if k == "gear_next_world":
+            if self.cfg.get("assistant.gear_help", True):
+                return self._gear_next_world(polish)
+            return "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach.", ""
         if k == "gear_next":
             if self.cfg.get("assistant.gear_help", True):
                 return self._gear_next(polish)
@@ -1904,6 +1911,25 @@ class Assistant:
             return False
         return False
 
+    def _best_gear_reward(self, world, qd: dict, player, avg: float):
+        """The highest item level reward of a quest that beats ``avg`` and fits the player, or None."""
+        best = None
+        for iid in qd.get("rw", []) or []:
+            rec = world.all_items.get(iid)
+            if rec is None:
+                try:
+                    rec = world.all_items.get(int(iid))
+                except (TypeError, ValueError):
+                    rec = None
+            if rec is None or not self._gear_reward_ok(rec, player):
+                continue
+            il = int(rec.get("il", 0) or 0)
+            if il <= avg:
+                continue
+            if best is None or il > best[0]:
+                best = (il, rec.get("n", "") or "")
+        return best
+
     def _gear_next(self, polish: str) -> tuple[str, str]:
         """Quests whose rewards look like a likely upgrade: approximate, no slot or stats guessed."""
         world = self.world_getter()
@@ -1921,24 +1947,6 @@ class Assistant:
             area = world.zone_of_map(pos.map_id)
         zone_name = (world.names.get(area, "") if area else "") or zone
 
-        def best_reward(qd: dict):
-            best = None
-            for iid in qd.get("rw", []) or []:
-                rec = world.all_items.get(iid)
-                if rec is None:
-                    try:
-                        rec = world.all_items.get(int(iid))
-                    except (TypeError, ValueError):
-                        rec = None
-                if rec is None or not self._gear_reward_ok(rec, player):
-                    continue
-                il = int(rec.get("il", 0) or 0)
-                if il <= avg:
-                    continue
-                if best is None or il > best[0]:
-                    best = (il, rec.get("n", "") or "")
-            return best
-
         best_by_quest: dict[int, tuple[float, float, str, str, str, int, str]] = {}
 
         def consider(qid: int, title: str, kind: str, dist, loc: str, reward) -> None:
@@ -1954,7 +1962,7 @@ class Assistant:
                 qd = world.quests.get(q.quest_id)
                 if not qd:
                     continue
-                reward = best_reward(qd)
+                reward = self._best_gear_reward(world, qd, player, avg)
                 if reward is None:
                     continue
                 if q.complete:
@@ -1996,7 +2004,7 @@ class Assistant:
                     continue
                 if not world.available(q, qid, player, active):
                     continue
-                reward = best_reward(q)
+                reward = self._best_gear_reward(world, q, player, avg)
                 if reward is None:
                     continue
                 spot = world.starter_spot(qid, pos, player.faction)
@@ -2021,6 +2029,63 @@ class Assistant:
             parts.append(f"Nie widzę noszonego sprzętu; liczę od poziomu {int(avg)}.")
         self._sources = [f"gear rewards: {len(found)}"]
         return " ".join(parts) if not found else "\n".join(parts), ""
+
+    def _gear_next_world(self, polish: str) -> tuple[str, str]:
+        """Available quests across the whole world with likely upgrade rewards: approximate, nearest same-map first."""
+        world = self.world_getter()
+        if world is None:
+            return "Nie mam jeszcze bazy questów. Zbuduj ją: python -m wvt.kb.build.", ""
+        player = self._player()
+        if not player.level:
+            return "Nie znam jeszcze Twojego poziomu – daj mi chwilę po wejściu do gry.", ""
+        if not player.done_known:
+            return "Nie znam jeszcze Twoich ukończonych questów – daj mi chwilę po wejściu do gry.", ""
+        avg, worn_count = self._worn_item_level()
+        pos = self.quests.pos
+        active = {q.quest_id for q in self.quests.quests()} if self.quests.known else set()
+        current_map = getattr(pos, "map_id", 0) if pos is not None else 0
+
+        found: list[tuple] = []
+        for qid, q in world.quests.items():
+            lvl = q.get("lvl") or q.get("min") or 0
+            if lvl and not (player.level - 4 <= lvl <= player.level + 2):
+                continue
+            if not world.available(q, qid, player, active):
+                continue
+            reward = self._best_gear_reward(world, q, player, avg)
+            if reward is None:
+                continue
+            spot = world.starter_spot(qid, pos, player.faction)
+            if spot is None:
+                continue
+            distance = spot.distance
+            same_map = distance is not None
+            zone = world.names.get(int(q.get("zone") or 0), "")
+            il, reward_name = reward
+            found.append((0 if same_map else 1, distance if same_map else 1e9, -(il - avg),
+                          q.get("n") or "", reward_name, il, zone, spot.name, "weź"))
+
+        found.sort(key=lambda c: (c[0], c[1], c[2]))
+        shown = found[:8]
+
+        parts = ["Questy na świecie z nagrodą na upgrade (najbliżej najpierw, przybliżone):"]
+        if shown:
+            for _ord, dist, neg_gain, title, reward_name, il, zone, giver, kind in shown:
+                gain = int(round(-neg_gain))
+                base = f"- {title} ({kind}): {reward_name}, poz. {il} (+{gain})"
+                if dist < 1e9:
+                    loc = ", ".join(x for x in (zone, f"u {giver}", f"~{int(round(dist))} yd") if x)
+                else:
+                    loc = ", ".join(x for x in (zone, f"u {giver} (inna mapa)") if x)
+                parts.append(base + (f", {loc}" if loc else ""))
+        else:
+            parts.append("Nie widzę dostępnych questów na świecie z nagrodą dla Twojej klasy i poziomu.")
+        if worn_count:
+            parts.append(f"Średnia Twojego sprzętu: {avg:.1f} ({worn_count} części).")
+        else:
+            parts.append(f"Nie widzę noszonego sprzętu; liczę od poziomu {int(avg)}.")
+        self._sources = [f"gear rewards world: {len(found)}"]
+        return "\n".join(parts), ""
 
     def _quest_text(self, kind: str, polish: str, quests: list) -> tuple[str, str]:
         book = self.quests

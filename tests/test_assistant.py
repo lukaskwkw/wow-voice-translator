@@ -872,6 +872,8 @@ def carrying_assistant():
     ("czy warto robić ten quest?", "quest_worth"),
     ("jakie questy dają lepszy sprzęt?", "gear_next"),
     ("gdzie iść po upgrade itemów?", "gear_next"),
+    ("questy na całym świecie na lepszy sprzęt", "gear_next_world"),
+    ("gdzie na świecie po upgrade itemów", "gear_next_world"),
     ("co robić żeby ulepszyć itemy?", "gear_next"),
     ("lepszy sprzęt?", "gear_next"),
     ("gdzie iść po lepszy sprzęt?", "gear_next"),
@@ -1051,6 +1053,64 @@ def test_gear_help_can_be_turned_off():
     a.cfg["assistant.gear_help"] = False
     reply, line = a.handle("gdzie iść po upgrade itemów?")
     assert line == ""
+    assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
+
+
+class FakeGearWorldWorld:
+    """Just enough of World for the whole-world gear advisor: quests, rewards, spots and zone names."""
+
+    names = {10: "Westfall", 20: "Redridge Mountains"}
+    all_items = {
+        900: {"n": "Soldier's Sword", "c": 2, "sc": 7, "il": 18, "rl": 10},
+        901: {"n": "Signet Ring", "c": 4, "sc": 0, "il": 17, "rl": 10},  # misc armor: every class
+        902: {"n": "Plate Chest", "c": 4, "sc": 4, "il": 22, "rl": 10},  # too heavy for a low warrior
+        903: {"n": "Rusty Sword", "c": 2, "sc": 7, "il": 8, "rl": 10},  # below the worn average
+    }
+    quests = {
+        601: {"n": "The Deadmines", "lvl": 15, "zone": 10, "rw": [900]},  # current zone, distance 30 yd
+        602: {"n": "Redridge Run", "lvl": 15, "zone": 20, "rw": [901]},  # other map, no distance
+        603: {"n": "Wrong Armor", "lvl": 15, "zone": 10, "rw": [902]},
+        604: {"n": "Too High", "lvl": 40, "zone": 10, "rw": [900]},
+        605: {"n": "Low Reward", "lvl": 15, "zone": 10, "rw": [903]},
+    }
+
+    def available(self, q, qid, player, active):
+        return True
+
+    def starter_spot(self, qid, pos, faction):
+        if qid == 602:
+            return SimpleNamespace(name="Marshal Marris", distance=None)
+        return SimpleNamespace(name="Gryan Stoutmantle", distance=30.0)
+
+
+def _world_gear_assistant():
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: FakeGearWorldWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.done_known = True
+    a._worn_item_level = lambda: (10.0, 5)
+    return a, llm
+
+
+def test_gear_next_world_lists_current_zone_first_then_other_maps():
+    a, llm = _world_gear_assistant()
+    reply, line = a._gear_next_world("gdzie na świecie po upgrade itemów")
+    assert line == "" and llm.calls == []
+    assert "Questy na świecie z nagrodą na upgrade" in reply
+    assert "The Deadmines" in reply and "Soldier's Sword" in reply
+    assert "Redridge Run" in reply and "Signet Ring" in reply and "inna mapa" in reply
+    assert reply.index("The Deadmines") < reply.index("Redridge Run")  # nearest / same map first
+    assert "Wrong Armor" not in reply and "Too High" not in reply and "Low Reward" not in reply
+    assert "Średnia Twojego sprzętu: 10.0 (5 części)." in reply
+    assert a._sources == ["gear rewards world: 2"]
+
+
+def test_gear_next_world_is_disabled_with_gear_help_off():
+    a, llm = _world_gear_assistant()
+    a.cfg["assistant.gear_help"] = False
+    reply, line = a.handle("gdzie na świecie po upgrade itemów")
+    assert line == "" and llm.calls == []
     assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
 
 

@@ -1341,7 +1341,8 @@ class TranslatorApp:
         gear_help = bool(self.cfg.get("assistant.gear_help", True))
         return [Suggestion(kind, "Reguła", description, kind, 0.0)
                 for kind, description in DIRECTIVES.items()
-                if (item_help or kind != "item_compare") and (gear_help or kind != "gear_next")]
+                if (item_help or kind != "item_compare")
+                and (gear_help or kind not in ("gear_next", "gear_next_world"))]
 
     def _ensure_history_overlay(self) -> HistoryOverlay:
         if self.history_overlay is None:
