@@ -133,3 +133,43 @@ def test_both_grids_in_one_capture():
     assert v.type == P.TYPE_VOICE and v.sender == "Shalana-Forever"
     img[:, P.VOICE_ORIGIN_X - 4:] = 30  # voice grid hidden -> nothing found there
     assert P.try_decode_at(img, P.VOICE_ORIGIN_X) is None
+
+
+# --------------------------------------------------------------------------- equipped gear snapshot
+
+def _equipment_packet():
+    return P.Packet(type=P.TYPE_EQUIP, seq=41, equipment=[
+        P.EquippedItem(slot=16, item_id=1000, item_level=17, quality=2, class_id=2, subclass_id=8,
+                       equip_loc="INVTYPE_WEAPONMAINHAND"),
+        P.EquippedItem(slot=5, item_id=1001, item_level=12, quality=1, class_id=4, subclass_id=3,
+                       equip_loc="INVTYPE_CHEST"),
+    ])
+
+
+def test_equipment_packet_roundtrip():
+    pkt = P.decode_image(P.render_cells(P.packet_cells(_equipment_packet())))
+    assert pkt.type == P.TYPE_EQUIP and pkt.seq == 41
+    assert pkt.equipment == [
+        P.EquippedItem(slot=16, item_id=1000, item_level=17, quality=2, class_id=2, subclass_id=8,
+                       equip_loc="INVTYPE_WEAPONMAINHAND"),
+        P.EquippedItem(slot=5, item_id=1001, item_level=12, quality=1, class_id=4, subclass_id=3,
+                       equip_loc="INVTYPE_CHEST"),
+    ]
+
+
+def test_equipment_body_ending_mid_entry_is_rejected():
+    body = b"\x00\x0c\x00\x01\x02" + b"\x10" * 12  # count says 2, only one entry follows
+    with pytest.raises(P.DecodeError):
+        P._parse_equip(body)
+    with pytest.raises(P.DecodeError):
+        P._parse_equip(b"\x00\x0c\x00\x01\x14" + b"\x00" * (P.EQUIP_ENTRY_BYTES * P.MAX_EQUIP_SLOTS))
+
+
+def test_old_types_still_decode_without_a_protocol_version_bump():
+    assert P.VERSION == 1 and P.TYPE_EQUIP == 12
+    loot = P.LootItem(roll_id=7, name="Gloves", item_level=24)
+    out = P.decode_image(P.render_cells(P.packet_cells(P.Packet(type=P.TYPE_LOOT, seq=3, loot=loot))))
+    assert out.type == P.TYPE_LOOT and out.loot.name == "Gloves"
+    pos = P.decode_image(P.render_cells(P.packet_cells(P.Packet(type=P.TYPE_POS, seq=4,
+                                                               pos=P.PlayerPos(1429, 0.4, 0.8, 3470, 2314)))))
+    assert pos.type == P.TYPE_POS and pos.pos.map_id == 1429

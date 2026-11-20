@@ -24,12 +24,13 @@ log = logging.getLogger(__name__)
 SEARCH = 3  # pixels of tolerance for the grid origin
 TYPE_NAMES = {protocol.TYPE_VOICE: "voice", protocol.TYPE_STATE: "state", protocol.TYPE_CHAT: "chat",
               protocol.TYPE_QUEST: "quest", protocol.TYPE_POS: "pos", protocol.TYPE_PLAYER: "player",
-              protocol.TYPE_DONE: "done", protocol.TYPE_LOOT: "loot"}
+              protocol.TYPE_DONE: "done", protocol.TYPE_LOOT: "loot", protocol.TYPE_EQUIP: "equip"}
 
 
 # everything the second (voice) grid carries
 ASSISTANT_GRID_TYPES = (protocol.TYPE_VOICE, protocol.TYPE_STATE, protocol.TYPE_CHAT, protocol.TYPE_QUEST,
-                        protocol.TYPE_POS, protocol.TYPE_PLAYER, protocol.TYPE_DONE, protocol.TYPE_LOOT)
+                        protocol.TYPE_POS, protocol.TYPE_PLAYER, protocol.TYPE_DONE, protocol.TYPE_LOOT,
+                        protocol.TYPE_EQUIP)
 
 class ScreenCapture:
     """Reusable GDI capture of a small screen region -> RGB numpy array."""
@@ -114,7 +115,7 @@ class VoiceDeduper:
     def is_new(self, pkt: protocol.Packet) -> bool:
         # seq restarts after /reload, so not alone; state packets have their own counter
         ident = (pkt.type, pkt.seq, pkt.sender, pkt.text, repr(pkt.state), repr(pkt.quest), repr(pkt.pos),
-                 repr(pkt.player), repr(pkt.done), repr(pkt.loot))
+                 repr(pkt.player), repr(pkt.done), repr(pkt.loot), repr(pkt.equipment))
         if ident in self._seen:
             return False
         self._seen.append(ident)

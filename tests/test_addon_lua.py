@@ -301,10 +301,12 @@ def voice(lua):
     def slash(cmd):
         g.SlashCmdList["WOWVOICETRANSLATOR"](cmd)
 
-    # the assistant's first state packet goes out right after login; let it pass (mouse off the chat)
+    # the assistant's first packets (gear snapshot, state) go out right after login; let them pass
     mock.mouseLine = None
-    for _ in range(3):
+    for _ in range(6):
         driver_tick(mock, 0.25)
+        if grid_packet(g) is None:
+            break
     assert grid_packet(g) is None
     return rt, g, mock, add_player, slash
 
@@ -694,6 +696,48 @@ def test_lua_player_done_and_loot_encoders_match_python(lua):
                       {"agi": 6, "sta": -4, "dps": 12.7}, [P.WornItem(15, 2, "Rough Leather Gloves", {"armor": 40})])
     assert lua_bytes == P.encode_packet(P.Packet(type=11, seq=6, loot=item))
     assert P.decode_image(P.render_cells(P.packet_cells(P.Packet(type=11, seq=6, loot=item)))).loot == item
+
+
+EQUIP_MOCK = r"""
+local links = {
+  [1] = "|cffa335ee|Hitem:4001::::::::|h[Helm]|h|r",
+  [5] = "|cff1eff00|Hitem:4002::::::::|h[Chest]|h|r",
+  [16] = "|cff0070dd|Hitem:4003::::::::|h[Sword]|h|r",
+}
+function GetInventoryItemLink(unit, slot) return links[slot] end
+local function instant(link)
+  if link:find("4001") then return 4001, "Armor", "Plate", "INVTYPE_HEAD", 1, 4, 4 end
+  if link:find("4002") then return 4002, "Armor", "Leather", "INVTYPE_CHEST", 1, 4, 2 end
+  return 4003, "Weapon", "Sword", "INVTYPE_WEAPONMAINHAND", 1, 2, 7
+end
+C_Item = {
+  GetItemInfoInstant = instant,
+  GetItemInfo = function(link)
+    if link:find("4001") then return "Helm", link, 4, 22, 20 end
+    if link:find("4002") then return "Chest", link, 2, 12, 10 end
+    return "Sword", link, 3, 17, 15
+  end,
+}
+"""
+
+
+def test_lua_equipment_snapshot_builds_equip_packet(lua):
+    rt, g, _mock = lua
+    rt.execute(EQUIP_MOCK)
+    items = g.WVT_EquipmentBytes()
+    assert len(list(items.values())) == 3
+    lp = _lua_protocol(rt)
+    raw = bytes(int(v) for v in lp.EncodePacket(
+        rt.table_from({"type": P.TYPE_EQUIP, "seq": 9, "items": items})).values())
+    cells = [k * 21 for k in range(P.CALIB_CELLS)] + P.bytes_to_cells(raw)
+    pkt = P.decode_image(P.render_cells(cells))
+    assert pkt.type == P.TYPE_EQUIP and pkt.seq == 9
+    assert [(e.slot, e.item_id, e.item_level) for e in pkt.equipment] == [(1, 4001, 22), (5, 4002, 12),
+                                                                          (16, 4003, 17)]
+    expected = [P.EquippedItem(1, 4001, 22, 4, 4, 4, "INVTYPE_HEAD"),
+                P.EquippedItem(5, 4002, 12, 2, 4, 2, "INVTYPE_CHEST"),
+                P.EquippedItem(16, 4003, 17, 3, 2, 7, "INVTYPE_WEAPONMAINHAND")]
+    assert raw == P.encode_packet(P.Packet(type=P.TYPE_EQUIP, seq=9, equipment=expected))
 
 
 WORLD_MOCK = r"""

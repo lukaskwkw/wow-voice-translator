@@ -1045,8 +1045,8 @@ def test_gear_next_suggests_upgrade_rewards_and_skips_bad_ones():
     a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
     a.quests.updated_at = time.time()
     a.quests.done_known = False
-    a._worn_pieces = lambda: [("Item A", 10, 1), ("Item B", 10, 1), ("Item C", 10, 1),
-                              ("Item D", 10, 1), ("Item E", 10, 1)]
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1), ("Item C", 10, 4, 1),
+                              ("Item D", 10, 4, 1), ("Item E", 10, 4, 1)]
     for i, qid in enumerate((501, 502, 503, 504), start=1):
         q = FakeGearWorld.quests[qid]
         a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
@@ -1057,7 +1057,7 @@ def test_gear_next_suggests_upgrade_rewards_and_skips_bad_ones():
     assert "Signet for a Friend" in reply and "Signet Ring" in reply  # misc armor fits every class
     assert "Wrong Armor" not in reply and "Low Reward" not in reply
     assert ("Znam 5 noszonych części (item level): Item A (poz. 10), Item B (poz. 10), Item C (poz. 10), "
-            "Item D (poz. 10), Item E (poz. 10). Próg: 10.0 – średnia item levelu tych części.") in reply
+            "Item D (poz. 10), Item E (poz. 10). Próg: pancerz 10.0 (5 części).") in reply
     assert a.transcript[0]["intent"] == "gear_next"
 
 
@@ -1071,10 +1071,10 @@ def test_gear_next_labels_a_small_sample_or_no_worn_gear_honestly():
     for i, qid in enumerate((501, 502, 503, 504), start=1):
         q = FakeGearWorld.quests[qid]
         a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
-    a._worn_pieces = lambda: [("Stary Miecz", 17, 7)]
+    a._worn_pieces = lambda: [("Stary Miecz", 17, 2, 7)]
     reply, _line = a.handle("gdzie iść po upgrade itemów?")
-    assert ("Znam 1 noszoną część (item level): Stary Miecz (poz. 17). Próg: 17.0 – średnia z tej próbki; "
-            "mała próbka, może być niemiarodajna.") in reply
+    assert ("Znam 1 noszoną część (item level): Stary Miecz (poz. 17). Próg: broń 17.0 (1 część). "
+            "Broń to mała próbka (1 część) – może być niemiarodajna.") in reply
     assert "poz. 18 (wym. 10), +1" in reply
     a._worn_pieces = lambda: []
     reply, _line = a.handle("gdzie iść po upgrade itemów?")
@@ -1095,7 +1095,7 @@ def test_gear_next_shows_the_questiedb_required_level_caveat_only_when_data_is_m
         a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
         a.quests.updated_at = time.time()
         a.quests.done_known = False
-        a._worn_pieces = lambda: [("Item A", 10, 1)]
+        a._worn_pieces = lambda: [("Item A", 10, 4, 1)]
         for i, qid in enumerate((501, 502, 503, 504), start=1):
             q = FakeGearWorld.quests[qid]
             a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
@@ -1153,8 +1153,8 @@ def _world_gear_assistant():
     a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
     a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
     a.quests.done_known = True
-    a._worn_pieces = lambda: [("Item A", 10, 1), ("Item B", 10, 1), ("Item C", 10, 1),
-                              ("Item D", 10, 1), ("Item E", 10, 1)]
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1), ("Item C", 10, 4, 1),
+                              ("Item D", 10, 4, 1), ("Item E", 10, 4, 1)]
     return a, llm
 
 
@@ -1168,8 +1168,37 @@ def test_gear_next_world_lists_current_zone_first_then_other_maps():
     assert reply.index("The Deadmines") < reply.index("Redridge Run")  # nearest / same map first
     assert "Wrong Armor" not in reply and "Too High" not in reply and "Low Reward" not in reply
     assert ("Znam 5 noszonych części (item level): Item A (poz. 10), Item B (poz. 10), Item C (poz. 10), "
-            "Item D (poz. 10), Item E (poz. 10). Próg: 10.0 – średnia item levelu tych części.") in reply
+            "Item D (poz. 10), Item E (poz. 10). Próg: pancerz 10.0 (5 części).") in reply
     assert a._sources == ["gear rewards world: 2"]
+
+
+def test_gear_next_world_scans_owned_items_at_most_three_times():
+    class NamedWorld(FakeGearWorldWorld):
+        all_items = {**FakeGearWorldWorld.all_items,
+                     1001: {"n": "Item A"}, 1002: {"n": "Item B"}, 1003: {"n": "Item C"},
+                     1004: {"n": "Item D"}, 1005: {"n": "Item E"}}
+
+    a, llm = _world_gear_assistant()
+    a.world_getter = lambda: NamedWorld()
+    del a._worn_pieces
+    a.equipment = [P.EquippedItem(slot=slot, item_id=1000 + i, item_level=10, class_id=4, subclass_id=1)
+                   for i, slot in enumerate((1, 2, 3, 5, 6), start=1)]
+    original = a._own_items
+    calls = []
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    a._own_items = counted
+    reply, line = a._gear_next_world("gdzie na świecie po upgrade itemów")
+    assert line == "" and llm.calls == []
+    assert "The Deadmines" in reply and "Soldier's Sword" in reply and "poz. 18 (wym. 10), +8" in reply
+    assert "Redridge Run" in reply and "Signet Ring" in reply and "inna mapa" in reply
+    assert reply.index("The Deadmines") < reply.index("Redridge Run")
+    assert ("Znam 5 noszonych części (item level): Item A (poz. 10), Item B (poz. 10), Item C (poz. 10), "
+            "Item D (poz. 10), Item E (poz. 10). Próg: pancerz 10.0 (5 części).") in reply
+    assert len(calls) <= 3
 
 
 def test_gear_next_world_is_disabled_with_gear_help_off():
@@ -1193,7 +1222,139 @@ def test_worn_pieces_reads_real_loot_data_and_dedupes():
         ])),
     }
     assert a._worn_item_level() == (17.0, 2)
-    assert a._worn_pieces() == [("Chest", 20, 4), ("Ring", 14, 0)]
+    assert a._worn_pieces() == [("Chest", 20, 0, 4), ("Ring", 14, 0, 0)]
+
+
+def _equipped_assistant():
+    world = SimpleNamespace(all_items={
+        1000: {"n": "Main Sword"},
+        1001: {"n": "Chest Plate"},
+        1002: {"n": "Leg Guards"},
+    })
+    a, *_ = make_assistant(world_getter=lambda: world)
+    a.equipment = [
+        P.EquippedItem(slot=16, item_id=1000, item_level=17, class_id=2, subclass_id=8),
+        P.EquippedItem(slot=5, item_id=1001, item_level=12, class_id=4, subclass_id=3),
+        P.EquippedItem(slot=7, item_id=1002, item_level=10, class_id=4, subclass_id=2),
+    ]
+    return a
+
+
+def test_worn_pieces_use_the_addon_snapshot_in_slot_order():
+    a = _equipped_assistant()
+    assert a._worn_pieces() == [
+        ("Chest Plate", 12, 4, 3), ("Leg Guards", 10, 4, 2), ("Main Sword", 17, 2, 8)]
+    assert a._worn_item_level(4) == (11.0, 2)
+    assert a._worn_item_level(2) == (17.0, 1)
+    assert a._worn_item_level() == (13.0, 3)
+
+
+def test_worn_pieces_skip_cosmetic_shirt_and_tabard():
+    class NamedWorld(FakeGearWorld):
+        all_items = {**FakeGearWorld.all_items,
+                     1000: {"n": "Main Sword"}, 1001: {"n": "Chest Plate"}, 1002: {"n": "Leg Guards"},
+                     1003: {"n": "Shirt"}, 1004: {"n": "Tabard"}}
+
+    a, *_ = make_assistant(world_getter=lambda: NamedWorld())
+    a.equipment = [
+        P.EquippedItem(slot=4, item_id=1003, item_level=1, class_id=4, subclass_id=1),
+        P.EquippedItem(slot=5, item_id=1001, item_level=12, class_id=4, subclass_id=3),
+        P.EquippedItem(slot=7, item_id=1002, item_level=10, class_id=4, subclass_id=2),
+        P.EquippedItem(slot=16, item_id=1000, item_level=17, class_id=2, subclass_id=8),
+        P.EquippedItem(slot=19, item_id=1004, item_level=1, class_id=4, subclass_id=1),
+    ]
+    assert a._worn_pieces() == [
+        ("Chest Plate", 12, 4, 3), ("Leg Guards", 10, 4, 2), ("Main Sword", 17, 2, 8)]
+    assert a._worn_item_level(4) == (11.0, 2)
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    reply, _line = a.handle("{gear_debug}")
+    assert "slot 4 (koszula)" in reply and "pomijam (kosmetyk)" in reply
+    assert "slot 19 (tabard)" in reply and "pomijam (kosmetyk)" in reply
+
+
+class PerCategoryGearWorld:
+    names = {10: "Westfall"}
+    all_items = {
+        800: {"n": "Sharp Sword", "c": 2, "sc": 7, "il": 16, "rl": 10},
+        801: {"n": "Tough Chest", "c": 4, "sc": 3, "il": 12, "rl": 10},
+    }
+    quests = {
+        701: {"n": "Weapon Quest", "lvl": 15, "zone": 10, "rw": [800]},
+        702: {"n": "Armor Quest", "lvl": 15, "zone": 10, "rw": [801]},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def available(self, q, qid, player, active):
+        return True
+
+    def starter_spot(self, qid, pos, faction):
+        return SimpleNamespace(name="Gryan Stoutmantle", distance=30.0)
+
+    def finisher_spot(self, qid, pos):
+        return None
+
+
+def test_gear_next_uses_the_per_category_threshold():
+    a = _equipped_assistant()
+    a.world_getter = lambda: PerCategoryGearWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    for i, qid in enumerate((701, 702), start=1):
+        q = PerCategoryGearWorld.quests[qid]
+        a.on_packet(quest_pkt(sync=1, index=i, total=2, quest_id=qid, title=q["n"], zone="Westfall"))
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "Sharp Sword" not in reply  # weapon 16 does not beat the worn weapon's 17
+    assert "Tough Chest" in reply and "+1" in reply  # armor 12 beats the worn armor's 11
+    assert "Próg: broń 17.0 (1 część), pancerz 11.0 (2 części)." in reply
+
+
+def test_worn_note_small_sample_and_no_snapshot_fallback():
+    a, *_ = make_assistant()
+    a.equipment = [P.EquippedItem(slot=16, item_id=1000, item_level=17, class_id=2, subclass_id=8)]
+    note = a._worn_note()
+    assert "Próg: broń 17.0 (1 część)." in note
+    assert "Broń to mała próbka (1 część)" in note
+    assert "część bez nazwy (poz. 17)" in note
+    a.equipment = []
+    a._items = {
+        "candidate": (time.time(), P.LootItem(name="Candidate", item_level=18, equipped=[
+            P.WornItem(name="Chest", item_level=20, subclass_id=4),
+        ])),
+    }
+    assert a._worn_pieces() == [("Chest", 20, 0, 4)]
+
+
+def test_gear_debug_reports_the_equipment_source():
+    class DebugGearWorld(FakeGearWorld):
+        all_items = {**FakeGearWorld.all_items,
+                     1000: {"n": "Main Sword"}, 1001: {"n": "Chest Plate"}, 1002: {"n": "Leg Guards"}}
+
+    def debug_assistant():
+        a = _equipped_assistant()
+        a.world_getter = lambda: DebugGearWorld()
+        a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+        a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+        a.quests.updated_at = time.time()
+        a.quests.done_known = False
+        return a
+
+    reply, _line = debug_assistant().handle("{gear_debug}")
+    assert "Dane sprzętu: zrzut z dodatku (3 części)." in reply
+    assert "Main Sword, poz. 17, klasa 2/8 | slot 16 (broń główna)" in reply
+    snap = debug_assistant()
+    snap.equipment = []
+    reply, _line = snap.handle("{gear_debug}")
+    assert "Dane sprzętu: tylko z łupu (addon nie przysłał zrzutu)." in reply
 
 
 def test_gear_debug_dumps_worn_pieces_rewards_and_verdicts():
@@ -1203,7 +1364,7 @@ def test_gear_debug_dumps_worn_pieces_rewards_and_verdicts():
     a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
     a.quests.updated_at = time.time()
     a.quests.done_known = False
-    a._worn_pieces = lambda: [("Item A", 10, 1), ("Item B", 10, 1)]
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1)]
     for i, qid in enumerate((501, 503, 504), start=1):
         q = FakeGearWorld.quests[qid]
         a.on_packet(quest_pkt(sync=1, index=i, total=3, quest_id=qid, title=q["n"], zone="Westfall"))

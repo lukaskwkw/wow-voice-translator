@@ -35,6 +35,7 @@ P.TYPE_DONE = 10 -- completed quest ids, in parts (assistant)
 P.FACTION_NONE, P.FACTION_ALLIANCE, P.FACTION_HORDE = 0, 1, 2
 P.MAX_DONE_IDS = 154 -- (MAX_BYTES - 11 - 2) / 3
 P.TYPE_LOOT = 11 -- an item somebody can roll on (assistant: need or greed)
+P.TYPE_EQUIP = 12 -- full equipped gear snapshot
 P.LFLAG_BOP, P.LFLAG_NEED, P.LFLAG_GREED, P.LFLAG_DE = 1, 2, 4, 8
 P.LFLAG_PICKED = 16 -- not a roll: an item the player just looted (rollID 0)
 P.LFLAG_BAG = 32 -- not a roll: a wearable item in the bags (its stats for questions; the app never comments)
@@ -437,6 +438,22 @@ function P.EncodePacket(p)
 			pushByte(b, #wname)
 			pushBytes(b, wname)
 			pushStats(w.stats)
+		end
+	elseif p.type == P.TYPE_EQUIP then
+		-- full equipped gear snapshot: count u8, then count x 11 bytes
+		-- (slot u8, itemID u32, itemLevel u16, quality u8, classID u8, subclassID u8, equipLocIndex u8)
+		local items = p.items or {}
+		local n = math.min(#items, 19)
+		pushByte(b, n)
+		for i = 1, n do
+			local it = items[i]
+			pushByte(b, it.slot)
+			pushU32(b, it.itemID)
+			pushU16(b, it.itemLevel)
+			pushByte(b, it.quality)
+			pushByte(b, it.classID)
+			pushByte(b, it.subclassID)
+			pushByte(b, it.equipLoc)
 		end
 	end
 	pushU16(b, P.Fletcher16(b, 3, #b))

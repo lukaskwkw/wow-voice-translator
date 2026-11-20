@@ -1152,10 +1152,16 @@ end
 
 local function ItemBasics(link)
 	local info = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
-	local _, _, _, equipLoc, _, classID, subclassID = SafeCall(info, link)
+	local itemID, _, _, equipLoc, _, classID, subclassID = SafeCall(info, link)
+	itemID = Plain(itemID, "number")
+	if not itemID then
+		local parsed = strmatch(link or "", "item:(%d+)")
+		itemID = parsed and tonumber(parsed) or 0
+	end
 	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 	local name, _, quality, itemLevel, minLevel = SafeCall(getInfo, link)
 	return {
+		itemID = itemID,
 		name = Plain(name, "string"),
 		quality = Plain(quality, "number") or 0,
 		itemLevel = Plain(itemLevel, "number") or 0,
@@ -1178,6 +1184,27 @@ local function WornFor(equipLoc)
 		end
 	end
 	return equipped
+end
+
+-- full equipped gear snapshot: one entry per occupied inventory slot (1..19)
+local function EquipmentBytes()
+	local items = {}
+	for slot = 1, 19 do
+		local worn = Plain(SafeCall(GetInventoryItemLink, "player", slot), "string")
+		if worn then
+			local b = ItemBasics(worn)
+			items[#items + 1] = {
+				slot = slot,
+				itemID = b.itemID or 0,
+				itemLevel = b.itemLevel or 0,
+				quality = b.quality or 0,
+				classID = b.classID or 0,
+				subclassID = b.subclassID or 0,
+				equipLoc = P.EQUIP_LOC_INDEX[b.equipLoc] or 0,
+			}
+		end
+	end
+	return items
 end
 
 local function BuildLoot(rollID, attempt)
@@ -1300,6 +1327,7 @@ local BAG_TEXT_BYTES = 380 -- one packet carries as many item lines as fit
 local bagQueue, bagLootQueue = {}, {}
 local bagSync, bagDirty, lastBagScan, lastBagFull, bagSig = 0, true, -1000, nil, nil
 local bagWorn = {} -- item ids whose stats were sent (again after 5 minutes or a change of gear)
+local equipDirty, lastEquip = true, 0 -- the full worn gear snapshot: on login, a gear change, or every 60 s
 local bagStats = { items = 0, sent = 0 }
 
 local function BagItems()
@@ -1436,6 +1464,10 @@ AssistantExtra = function(now)
 		questSeq = (questSeq + 1) % 65536
 		q.seq = questSeq
 		return P.EncodePacket(q)
+	end
+	if ((equipDirty and now - lastEquip >= 1) or now - lastEquip > 60) then
+		equipDirty, lastEquip = false, now
+		return P.EncodePacket({ type = P.TYPE_EQUIP, items = EquipmentBytes() })
 	end
 	return PlayerBytes(now) or DoneBytes(now) or BagBytes(now)
 end
@@ -1820,6 +1852,9 @@ events:SetScript("OnEvent", function(_, event, ...)
 			bagDirty = true
 		elseif event == "PLAYER_EQUIPMENT_CHANGED" then
 			bagDirty, bagWorn = true, {} -- the comparisons of what you carry changed
+			equipDirty = true
+		elseif event == "PLAYER_ENTERING_WORLD" then
+			equipDirty = true
 		end
 		return
 	end
@@ -1974,3 +2009,5 @@ SlashCmdList["WOWVOICETRANSLATOR"] = function(msg)
 		Print("/wvt way <mapa> <x> <y> [opis] | way clear | track <numer questa>")
 	end
 end
+
+WVT_EquipmentBytes = EquipmentBytes

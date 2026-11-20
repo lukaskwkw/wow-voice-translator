@@ -747,6 +747,8 @@ class Assistant:
         self.quests = quests if quests is not None else QuestBook()
         self.state: Optional[protocol.GameState] = None
         self.state_at = 0.0
+        self.equipment: list[protocol.EquippedItem] = []
+        self.equipment_at = 0.0
         self._invited: dict[str, float] = {}
         # the conversation: every question and answer (for her LLM), and what you are talking about (follow-ups)
         self._history: deque[dict] = deque(maxlen=12)
@@ -811,6 +813,9 @@ class Assistant:
             self.quests.on_packet(pkt)
             if pkt.type == protocol.TYPE_QUEST and pkt.quest is not None:
                 self._quest_events(pkt.quest)
+        elif pkt.type == protocol.TYPE_EQUIP:
+            self.equipment = list(pkt.equipment)
+            self.equipment_at = time.time()
         elif pkt.type == protocol.TYPE_LOOT and pkt.loot is not None:
             self._on_loot(pkt.loot)
 
@@ -1876,10 +1881,24 @@ class Assistant:
         self._sources = [f"QuestieDB: {len(found)} available in {zone_name or '?'}"]
         return reply, ""
 
-    def _worn_pieces(self) -> list[tuple[str, int, int]]:
-        """(name, item level, subclass) of every worn piece the addon has shown so far, deduped."""
+    def _worn_pieces(self) -> list[tuple[str, int, int, int]]:
+        """(name, item level, class, subclass) of every worn piece the addon has shown."""
+        if self.equipment:
+            # one entry per occupied slot: two identical rings are two pieces, do not dedupe
+            world = self.world_getter()
+            own = self._own_items()
+            pieces: list[tuple[str, int, int, int]] = []
+            for it in sorted(self.equipment, key=lambda x: x.slot):
+                if it.slot in (4, 19):
+                    continue  # shirt and tabard are cosmetic, not gear
+                il = int(it.item_level or 0)
+                if il <= 0:
+                    continue
+                pieces.append((self._equip_name(it, world, own), il, int(it.class_id or 0),
+                               int(it.subclass_id or 0)))
+            return pieces
         seen: set[tuple[str, int]] = set()
-        pieces: list[tuple[str, int, int]] = []
+        pieces = []
         for o in self._own_items():
             loot = o.loot
             if loot is None:
@@ -1892,31 +1911,77 @@ class Assistant:
                 if key in seen:
                     continue
                 seen.add(key)
-                pieces.append((w.name, il, int(w.subclass_id or 0)))
+                pieces.append((w.name, il, 0, int(w.subclass_id or 0)))
         return pieces
 
-    def _worn_item_level(self) -> tuple[float, int]:
-        """(average item level of what you wear, pieces counted); no worn data = your level, 0 pieces."""
+    def _equip_name(self, it: protocol.EquippedItem, world, own: list["OwnItem"]) -> str:
+        """QuestieDB name of a worn slot, else a bag item with the same item id; never invented."""
+        rec = world.all_items.get(int(it.item_id)) if world is not None and hasattr(world, "all_items") else None
+        name = (rec or {}).get("n", "") or ""
+        if name:
+            return name
+        return next((o.name for o in own
+                     if o.bag is not None and int(getattr(o.bag, "item_id", 0) or 0) == int(it.item_id) and o.name), "")
+
+    def _worn_thresholds(self) -> dict[int, float]:
+        """{0: overall, 2: weapons, 4: armor} average item levels of the worn pieces (0 = player level when none)."""
         pieces = self._worn_pieces()
         if not pieces:
+            level = float(self._player().level or 1)
+            return {0: level, 2: level, 4: level}
+        overall = sum(il for _name, il, _c, _sc in pieces) / len(pieces)
+        out = {0: overall}
+        for cls in (2, 4):
+            same = [il for _name, il, c, _sc in pieces if c == cls]
+            out[cls] = sum(same) / len(same) if same else overall
+        return out
+
+    def _worn_threshold(self, class_id: int, thresholds: Optional[dict[int, float]] = None) -> float:
+        """Average item level of worn pieces of that class; overall average, else the player's level."""
+        if thresholds is None:
+            thresholds = self._worn_thresholds()
+        return thresholds.get(class_id, thresholds[0])
+
+    def _worn_item_level(self, cls: int = 0, pieces: Optional[list] = None) -> tuple[float, int]:
+        """(average item level, pieces counted) overall or for one class; no data = your level, 0 pieces."""
+        if pieces is None:
+            pieces = self._worn_pieces()
+        if not pieces:
             return float(self._player().level or 1), 0
-        return sum(il for _name, il, _sc in pieces) / len(pieces), len(pieces)
+        if cls:
+            same = [il for _name, il, c, _sc in pieces if c == cls]
+            if not same:
+                return sum(il for _name, il, _c, _sc in pieces) / len(pieces), 0
+            return sum(same) / len(same), len(same)
+        return sum(il for _name, il, _c, _sc in pieces) / len(pieces), len(pieces)
 
     def _worn_note(self) -> str:
-        """The worn gear the advisor can see, named, with its item levels and the threshold it implies."""
+        """The worn gear the advisor can see, named, with its item levels and the per-category threshold."""
         pieces = self._worn_pieces()
-        avg, count = self._worn_item_level()
-        if count == 0:
-            return (f"Nie widzę noszonego sprzętu; porównuję z Twoim poziomem ({int(avg)}), "
-                    f"co jest tylko zgrubnym przybliżeniem.")
-        shown = ", ".join(f"{name or 'część bez nazwy'} (poz. {il})" for name, il, _sc in pieces[:6])
+        if not pieces:
+            return (f"Nie widzę noszonego sprzętu; porównuję z Twoim poziomem "
+                    f"({int(self._worn_item_level(0, pieces)[0])}), co jest tylko zgrubnym przybliżeniem.")
+        shown = ", ".join(f"{name or 'część bez nazwy'} (poz. {il})" for name, il, _c, _sc in pieces[:6])
         shown = shown or "bez nazw"
         more = f" i jeszcze {len(pieces) - 6}" if len(pieces) > 6 else ""
-        head = (f"Znam {count} {plural(count, 'noszoną część', 'noszone części', 'noszonych części')} "
+        head = (f"Znam {len(pieces)} {plural(len(pieces), 'noszoną część', 'noszone części', 'noszonych części')} "
                 f"(item level): {shown}{more}.")
-        if count >= 4:
-            return head + f" Próg: {avg:.1f} – średnia item levelu tych części."
-        return head + f" Próg: {avg:.1f} – średnia z tej próbki; mała próbka, może być niemiarodajna."
+        w_avg, w_n = self._worn_item_level(2, pieces)
+        a_avg, a_n = self._worn_item_level(4, pieces)
+        o_avg, o_n = self._worn_item_level(0, pieces)
+        bits = []
+        if w_n:
+            bits.append(f"broń {w_avg:.1f} ({w_n} {plural(w_n, 'część', 'części', 'części')})")
+        if a_n:
+            bits.append(f"pancerz {a_avg:.1f} ({a_n} {plural(a_n, 'część', 'części', 'części')})")
+        if bits:
+            tail = "Próg: " + ", ".join(bits) + "."
+        else:
+            tail = f"Próg: {o_avg:.1f} ({o_n} {plural(o_n, 'część', 'części', 'części')})."
+        for word, n in (("Broń", w_n), ("Pancerz", a_n)):
+            if 0 < n < 4:
+                tail += f" {word} to mała próbka ({n} {plural(n, 'część', 'części', 'części')}) – może być niemiarodajna."
+        return head + " " + tail
 
     def _gear_reward_ok(self, rec: dict, player) -> bool:
         """Whether a reward record is wearable by this class and level (approximate, item level only)."""
@@ -1938,8 +2003,8 @@ class Assistant:
             return False
         return False
 
-    def _best_gear_reward(self, world, qd: dict, player, avg: float):
-        """The highest item level reward (item level, name, required level) that beats ``avg`` and fits, or None."""
+    def _best_gear_reward(self, world, qd: dict, player, thresholds: Optional[dict[int, float]] = None):
+        """The highest item level reward (il, name, rl, class, gain) that beats the class threshold and fits."""
         best = None
         for iid in qd.get("rw", []) or []:
             rec = world.all_items.get(iid)
@@ -1951,10 +2016,12 @@ class Assistant:
             if rec is None or not self._gear_reward_ok(rec, player):
                 continue
             il = int(rec.get("il", 0) or 0)
-            if il <= avg:
+            c = int(rec.get("c", 0) or 0)
+            gain = il - self._worn_threshold(c, thresholds)
+            if gain <= 0:
                 continue
             if best is None or il > best[0]:
-                best = (il, rec.get("n", "") or "", int(rec.get("rl", 0) or 0))
+                best = (il, rec.get("n", "") or "", int(rec.get("rl", 0) or 0), c, gain)
         return best
 
     def _gear_next(self, polish: str) -> tuple[str, str]:
@@ -1965,7 +2032,7 @@ class Assistant:
         player = self._player()
         if not player.level:
             return "Nie znam jeszcze twojego poziomu – daj mi chwilę po wejściu do gry.", ""
-        avg, _worn_count = self._worn_item_level()
+        thresholds = self._worn_thresholds()
         pos = self.quests.pos
         st = self.state
         zone = (st.zone or st.subzone) if st is not None else ""
@@ -1974,11 +2041,11 @@ class Assistant:
             area = world.zone_of_map(pos.map_id)
         zone_name = (world.names.get(area, "") if area else "") or zone
 
-        best_by_quest: dict[int, tuple[float, float, str, str, str, int, int, str]] = {}
+        best_by_quest: dict[int, tuple[float, float, str, str, str, int, int, int, str]] = {}
 
         def consider(qid: int, title: str, kind: str, dist, loc: str, reward) -> None:
-            il, name, rl = reward
-            cand = (il - avg, dist if dist is not None else 1e9, title, kind, name, il, rl, loc)
+            il, name, rl, c, gain = reward
+            cand = (gain, dist if dist is not None else 1e9, title, kind, name, il, rl, c, loc)
             old = best_by_quest.get(qid)
             if old is None or cand[0] > old[0]:
                 best_by_quest[qid] = cand
@@ -1989,7 +2056,7 @@ class Assistant:
                 qd = world.quests.get(q.quest_id)
                 if not qd:
                     continue
-                reward = self._best_gear_reward(world, qd, player, avg)
+                reward = self._best_gear_reward(world, qd, player, thresholds)
                 if reward is None:
                     continue
                 if q.complete:
@@ -2031,7 +2098,7 @@ class Assistant:
                     continue
                 if not world.available(q, qid, player, active):
                     continue
-                reward = self._best_gear_reward(world, q, player, avg)
+                reward = self._best_gear_reward(world, q, player, thresholds)
                 if reward is None:
                     continue
                 spot = world.starter_spot(qid, pos, player.faction)
@@ -2043,7 +2110,7 @@ class Assistant:
         found = sorted(best_by_quest.values(), key=lambda c: (-c[0], c[1]))
         parts = ["Przybliżone upgrade'y (bez slotu i statystyk nagród):"]
         if found:
-            for gain, _dist, title, kind, rname, il, rl, loc in found[:6]:
+            for gain, _dist, title, kind, rname, il, rl, _c, loc in found[:6]:
                 req = f" (wym. {rl})" if rl > 0 else ""
                 bit = f"- {title} ({kind}): {rname}, poz. {il}{req}, +{int(round(gain))}"
                 if loc:
@@ -2068,7 +2135,7 @@ class Assistant:
             return "Nie znam jeszcze Twojego poziomu – daj mi chwilę po wejściu do gry.", ""
         if not player.done_known:
             return "Nie znam jeszcze Twoich ukończonych questów – daj mi chwilę po wejściu do gry.", ""
-        avg, _worn_count = self._worn_item_level()
+        thresholds = self._worn_thresholds()
         pos = self.quests.pos
         active = {q.quest_id for q in self.quests.quests()} if self.quests.known else set()
         current_map = getattr(pos, "map_id", 0) if pos is not None else 0
@@ -2080,7 +2147,7 @@ class Assistant:
                 continue
             if not world.available(q, qid, player, active):
                 continue
-            reward = self._best_gear_reward(world, q, player, avg)
+            reward = self._best_gear_reward(world, q, player, thresholds)
             if reward is None:
                 continue
             spot = world.starter_spot(qid, pos, player.faction)
@@ -2089,16 +2156,16 @@ class Assistant:
             distance = spot.distance
             same_map = distance is not None
             zone = world.names.get(int(q.get("zone") or 0), "")
-            il, reward_name, rl = reward
-            found.append((0 if same_map else 1, distance if same_map else 1e9, -(il - avg),
-                          q.get("n") or "", reward_name, il, rl, zone, spot.name, "weź"))
+            il, reward_name, rl, c, gain = reward
+            found.append((0 if same_map else 1, distance if same_map else 1e9, -gain,
+                          q.get("n") or "", reward_name, il, rl, c, zone, spot.name, "weź"))
 
         found.sort(key=lambda c: (c[0], c[1], c[2]))
         shown = found[:8]
 
         parts = ["Questy na świecie z nagrodą na upgrade (najbliżej najpierw, przybliżone):"]
         if shown:
-            for _ord, dist, neg_gain, title, reward_name, il, rl, zone, giver, kind in shown:
+            for _ord, dist, neg_gain, title, reward_name, il, rl, _c, zone, giver, kind in shown:
                 gain = int(round(-neg_gain))
                 req = f" (wym. {rl})" if rl > 0 else ""
                 base = f"- {title} ({kind}): {reward_name}, poz. {il}{req}, +{gain}"
@@ -2124,7 +2191,7 @@ class Assistant:
         player = self._player()
         if not player.level:
             return "Nie znam jeszcze twojego poziomu – daj mi chwilę po wejściu do gry.", ""
-        avg, _worn_count = self._worn_item_level()
+        thresholds = self._worn_thresholds()
         pos = self.quests.pos
         st = self.state
         zone = (st.zone or st.subzone) if st is not None else ""
@@ -2135,30 +2202,46 @@ class Assistant:
         journal = self.quests.quests() if self.quests.known else []
 
         parts = ["Diagnostyka doradcy sprzętu (przybliżona: item level, bez slotu i statystyk nagród):"]
+        parts.append(f"Dane sprzętu: {'zrzut z dodatku (' + str(len(self.equipment)) + ' części)' if self.equipment else 'tylko z łupu (addon nie przysłał zrzutu)'}.")
         parts.append(f"Poziom {player.level}, klasa {player.class_id}, frakcja {player.faction or '?'}, "
                      f"ukończone znane: {'tak' if player.done_known else 'nie'}, strefa {zone_name or '?'} "
                      f"(area {area or '?'}), dziennik: {len(journal)}.")
 
         worn_lines: list[str] = []
-        for o in self._own_items():
-            loot = o.loot
-            if loot is None:
-                continue
-            for w in loot.equipped or []:
-                if int(w.item_level or 0) <= 0:
+        if self.equipment:
+            world = self.world_getter()
+            own = self._own_items()
+            for it in sorted(self.equipment, key=lambda x: x.slot):
+                il = int(it.item_level or 0)
+                if il <= 0:
                     continue
-                line = (f"- {w.name or 'bez nazwy'}, poz. {w.item_level}, podklasa {w.subclass_id} "
-                        f"| z: {o.loot.name or '?'}")
-                if o.looted_at:
-                    line += f", sprzed {max(0, int((time.time() - o.looted_at) / 60))} min"
+                name = self._equip_name(it, world, own)
+                line = (f"- {name or 'bez nazwy'}, poz. {il}, klasa {int(it.class_id or 0)}/"
+                        f"{int(it.subclass_id or 0)} | slot {it.slot} "
+                        f"({protocol.EQUIP_SLOT_NAMES.get(it.slot, '?')})")
+                if it.slot in (4, 19):
+                    line += ", pomijam (kosmetyk)"
                 worn_lines.append(line)
+        else:
+            for o in self._own_items():
+                loot = o.loot
+                if loot is None:
+                    continue
+                for w in loot.equipped or []:
+                    if int(w.item_level or 0) <= 0:
+                        continue
+                    line = (f"- {w.name or 'bez nazwy'}, poz. {w.item_level}, podklasa {w.subclass_id} "
+                            f"| z: {o.loot.name or '?'}")
+                    if o.looted_at:
+                        line += f", sprzed {max(0, int((time.time() - o.looted_at) / 60))} min"
+                    worn_lines.append(line)
         parts.append(f"Noszone części, które widzę ({len(worn_lines)}):")
         if not worn_lines:
             parts.append("Nie widzę żadnej noszonej części – addon przysyła je tylko przy itemie z tego samego slotu.")
         else:
-            parts.extend(worn_lines[:12])
-            if len(worn_lines) > 12:
-                parts.append(f"i jeszcze {len(worn_lines) - 12}")
+            parts.extend(worn_lines[:18])
+            if len(worn_lines) > 18:
+                parts.append(f"i jeszcze {len(worn_lines) - 18}")
         parts.append(self._worn_note())
 
         parts.append(f"Nagrody w dzienniku ({len(journal)} questów):")
@@ -2187,14 +2270,15 @@ class Assistant:
                 c = int(rec.get("c", 0) or 0)
                 sc = int(rec.get("sc", 0) or 0)
                 rec_name = rec.get("n", "") or ""
+                avg = self._worn_threshold(c, thresholds)
                 if rl > player.level:
                     verdict = f"wymóg poziomu {rl}"
                 elif not self._gear_reward_ok(rec, player):
                     verdict = "zła klasa"
                 elif il <= avg:
-                    verdict = "za nisko"
+                    verdict = f"za nisko (poz. {il} <= próg {avg:.1f})"
                 else:
-                    verdict = "bierę"
+                    verdict = f"bierę (+{il - avg:.1f})"
                 parts.append(f"- {q.title} (id {qid}): {rec_name} (id {iid}), poz. {il}, "
                              f"wym. {rl or '?'}, klasa {c}/{sc} -> {verdict}")
 
@@ -2209,7 +2293,7 @@ class Assistant:
                     continue
                 if not world.available(q, qid, player, active):
                     continue
-                if self._best_gear_reward(world, q, player, avg) is None:
+                if self._best_gear_reward(world, q, player, thresholds) is None:
                     continue
                 k += 1
             parts.append(f"Dostępne w strefie z nagrodami: {k}.")

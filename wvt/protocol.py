@@ -76,6 +76,7 @@ TYPE_POS = 8  # the player's map position (assistant)
 TYPE_PLAYER = 9  # class, race, faction, sex of the player (assistant: what quests fit)
 TYPE_DONE = 10  # completed quest ids, in parts (assistant: which quests are left to take)
 TYPE_LOOT = 11  # an item of a group loot roll + what the player wears in that slot (assistant: need or greed)
+TYPE_EQUIP = 12  # full equipped gear snapshot (assistant: what you wear, per slot)
 
 FLAG_SECRET = 0x01  # message text is a Midnight "secret value" – unreadable for addons
 FLAG_TRUNCATED = 0x02  # text had to be shortened to fit the grid
@@ -133,6 +134,16 @@ EQUIP_LOCS = (
     "INVTYPE_WEAPONMAINHAND", "INVTYPE_WEAPONOFFHAND", "INVTYPE_HOLDABLE", "INVTYPE_RANGED", "INVTYPE_THROWN",
     "INVTYPE_RANGEDRIGHT", "INVTYPE_RELIC", "INVTYPE_TABARD", "INVTYPE_BAG", "INVTYPE_AMMO", "INVTYPE_QUIVER",
 )
+# TYPE_EQUIP: inventory slots the addon reports (GetInventoryItemLink 1..19)
+MAX_EQUIP_SLOTS = 19
+EQUIP_ENTRY_BYTES = 11  # slot u8, itemID u32, itemLevel u16, quality u8, classID u8, subclassID u8, equipLoc u8
+# magic 2 + version/type 2 + seq 2 + count 1
+EQUIP_FIXED_BYTES = 7
+EQUIP_SLOT_NAMES = {
+    1: "głowa", 2: "szyja", 3: "ramiona", 4: "koszula", 5: "tors", 6: "talia", 7: "nogi", 8: "stopy",
+    9: "nadgarstki", 10: "dłonie", 11: "palec 1", 12: "palec 2", 13: "trinket 1", 14: "trinket 2",
+    15: "płaszcz", 16: "broń główna", 17: "off hand", 18: "broń dystansowa", 19: "tabard",
+}
 # stat codes of TYPE_LOOT (Core.lua STAT_PATTERNS); "dps" travels x10
 STAT_CODES = {1: "str", 2: "agi", 3: "sta", 4: "int", 5: "spi", 6: "armor", 7: "dps", 8: "ap", 9: "rap", 10: "sp",
               11: "heal", 12: "crit", 13: "hit", 14: "spell_crit", 15: "spell_hit", 16: "def", 17: "mp5",
@@ -227,6 +238,7 @@ class Packet:
     player: Optional["PlayerInfo"] = None
     done: Optional["DoneChunk"] = None
     loot: Optional["LootItem"] = None
+    equipment: list["EquippedItem"] = field(default_factory=list)
 
     @property
     def is_secret(self) -> bool:
@@ -373,6 +385,19 @@ class WornItem:
     subclass_id: int = 0
     name: str = ""
     stats: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class EquippedItem:
+    """One worn piece from TYPE_EQUIP: slot, item id and the client's own item data."""
+
+    slot: int = 0
+    item_id: int = 0
+    item_level: int = 0
+    quality: int = 0
+    class_id: int = 0
+    subclass_id: int = 0
+    equip_loc: str = ""
 
 
 @dataclass
@@ -592,6 +617,15 @@ def encode_packet(p: Packet) -> bytes:
             wname = utf8_truncate(w.name.encode("utf-8"), MAX_WORN_NAME_BYTES)
             body += _u16(w.item_level).to_bytes(2, "big") + bytes([max(0, min(255, w.subclass_id)), len(wname)])
             body += wname + _encode_stats(w.stats)
+    elif p.type == TYPE_EQUIP:
+        items = p.equipment[:MAX_EQUIP_SLOTS]
+        body.append(len(items))
+        for it in items:
+            loc = EQUIP_LOCS.index(it.equip_loc) if it.equip_loc in EQUIP_LOCS else 0
+            body += bytes([max(0, min(255, int(it.slot)))])
+            body += _u32(it.item_id).to_bytes(4, "big")
+            body += _u16(it.item_level).to_bytes(2, "big")
+            body += bytes(max(0, min(255, int(v))) for v in (it.quality, it.class_id, it.subclass_id, loc))
     elif p.type == TYPE_DONE:
         d = p.done or DoneChunk()
         ids = d.ids[:MAX_DONE_IDS]
@@ -806,6 +840,15 @@ def decode_image(img: np.ndarray, ox: int = 0, oy: int = 0) -> Packet:
         if pos + 2 > MAX_BYTES:
             raise DecodeError("length out of range")
         data = read_bytes(pos + 2)
+    elif ptype == TYPE_EQUIP:
+        data = read_bytes(EQUIP_FIXED_BYTES)
+        count = data[EQUIP_FIXED_BYTES - 1]
+        if count > MAX_EQUIP_SLOTS:
+            raise DecodeError("equip slot count out of range")
+        total = EQUIP_FIXED_BYTES + EQUIP_ENTRY_BYTES * count + 2
+        if total > MAX_BYTES:
+            raise DecodeError("length out of range")
+        data = read_bytes(total)
     elif ptype == TYPE_DONE:
         data = read_bytes(DONE_FIXED_BYTES)
         count = data[-1]
@@ -834,6 +877,8 @@ def decode_image(img: np.ndarray, ox: int = 0, oy: int = 0) -> Packet:
         return Packet(type=TYPE_PLAYER, seq=seq, player=PlayerInfo(body[4], body[5], body[6], body[7]))
     if ptype == TYPE_LOOT:
         return Packet(type=TYPE_LOOT, seq=seq, loot=_parse_loot(body))
+    if ptype == TYPE_EQUIP:
+        return Packet(type=TYPE_EQUIP, seq=seq, equipment=_parse_equip(body))
     if ptype == TYPE_DONE:
         count = body[8]
         ids = [int.from_bytes(body[9 + 3 * i: 12 + 3 * i], "big") for i in range(count)]
@@ -978,6 +1023,31 @@ def _parse_loot(body: bytes) -> LootItem:
         w.stats, pos = _decode_stats(body, pos + 4 + n)
         it.equipped.append(w)
     return it
+
+
+def _parse_equip(body: bytes) -> list[EquippedItem]:
+    if len(body) < EQUIP_FIXED_BYTES - 2:
+        raise DecodeError("equip body ends mid-entry")
+    count = body[4]
+    if count > MAX_EQUIP_SLOTS:
+        raise DecodeError("equip slot count out of range")
+    if len(body) < EQUIP_FIXED_BYTES - 2 + EQUIP_ENTRY_BYTES * count:
+        raise DecodeError("equip body ends mid-entry")
+    items: list[EquippedItem] = []
+    pos = EQUIP_FIXED_BYTES - 2
+    for _ in range(count):
+        loc = body[pos + 10]
+        items.append(EquippedItem(
+            slot=body[pos],
+            item_id=int.from_bytes(body[pos + 1:pos + 5], "big"),
+            item_level=int.from_bytes(body[pos + 5:pos + 7], "big"),
+            quality=body[pos + 7],
+            class_id=body[pos + 8],
+            subclass_id=body[pos + 9],
+            equip_loc=EQUIP_LOCS[loc] if loc < len(EQUIP_LOCS) else "",
+        ))
+        pos += EQUIP_ENTRY_BYTES
+    return items
 
 
 def _parse_pos(body: bytes, seq: int) -> Packet:
