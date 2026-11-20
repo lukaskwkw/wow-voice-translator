@@ -73,7 +73,7 @@ from .directives import DIRECTIVES, is_real_question, split as split_directives
 from .jev import JevDecision, jev_router
 from .kb.world import Player
 from .lexicon import Correction, Lexicon
-from .loot import advise as loot_advise, item_verdict, pickup_tip
+from .loot import advise as loot_advise, best_armor, item_verdict, pickup_tip, SHIELD_CLASSES, WEAPONS
 from .planner import Plan, Step, make_plan, skip_sentence
 from .quests import QuestBook, match_quests, spoken_objective
 from .quest_tips import Chains, assess
@@ -391,6 +391,10 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("note_list", r"\b(jakie|co|pokaz\w*|przeczytaj|wymien\w*)\b.*\b(notatk\w*|zanotowal\w*|zapisal\w*)\b"),
     ("note_done", r"\b(usun\w*|skasuj\w*|wyczysc\w*|odhacz\w*|wykresl\w*)\b.*\bnotatk\w*\b|^(zrobione|zalatwione|gotowe)\b"),
     ("note_add", r"^(?:(?:ej|hej|iskra|prosze|i)\s+)*(zanotuj|zapisz|zapamietaj|notatka|dodaj notatke)\w*\b"),
+    ("gear_next", r"\bupgrade\b|\bulepsz\w*\b"
+                  r"|\b(lepsz\w*|now\w*)\b.*\b(sprzet|gear|item\w*|ekwipunk\w*)\b"
+                  r"|\b(gdzie|jakie|co|ktore)\b.*\bquest\w*\b.*\b(nagrod\w*|sprzet|gear|item\w*|ekwipunk\w*|ulepsz\w*)\b"
+                  r"|\bgdzie\b.*\bpo\b.*\b(lepsz\w*|now\w*|upgrade)\b"),
     ("item_about", rf"^(?!.*\b(quest\w*|kwest\w*|zadani\w*|gdzie|kupi\w*|kupic)\b)"
                    rf"(?:(?=.*\b{_ITEM_NOUN}\b).*\b{_ITEM_Q}\b|(?:a\s+)?co to (?:jest )?za\b)"),
     ("stats_reset", r"\b(zresetuj\w*|wyzeruj\w*|resetuj\w*|zeruj\w*)\b.*\b(statystyk\w*|licznik\w*|sesj\w*)\b"),
@@ -1338,6 +1342,10 @@ class Assistant:
                 return "Nie było czego odhaczać.", ""
             return self._v("Odhaczone.", "Wykreślone, brawo ty.", "Załatwione, skreślam.") + \
                 (f" Usunęłam {len(gone)} notatki." if len(gone) > 1 else ""), ""
+        if k == "gear_next":
+            if self.cfg.get("assistant.gear_help", True):
+                return self._gear_next(polish)
+            return "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach.", ""
         if k == "quest_worth":
             return self._worth(polish), ""
         if k == "stats":
@@ -1854,6 +1862,165 @@ class Assistant:
             reply += f" I jeszcze {len(found) - 6}."
         self._sources = [f"QuestieDB: {len(found)} available in {zone_name or '?'}"]
         return reply, ""
+
+    def _worn_item_level(self) -> tuple[float, int]:
+        """(average item level of what you wear, pieces counted); no worn data = your level, 0 pieces."""
+        seen: set[tuple[str, int]] = set()
+        levels: list[int] = []
+        for o in self._own_items():
+            loot = o.loot
+            if loot is None:
+                continue
+            for w in loot.equipped or []:
+                il = int(w.item_level or 0)
+                if il <= 0:
+                    continue
+                key = (w.name, il)
+                if key in seen:
+                    continue
+                seen.add(key)
+                levels.append(il)
+        if not levels:
+            return float(self._player().level or 1), 0
+        return sum(levels) / len(levels), len(levels)
+
+    def _gear_reward_ok(self, rec: dict, player) -> bool:
+        """Whether a reward record is wearable by this class and level (approximate, item level only)."""
+        c = int(rec.get("c", 0) or 0)
+        sc = int(rec.get("sc", 0) or 0)
+        il = int(rec.get("il", 0) or 0)
+        rl = int(rec.get("rl", 0) or 0)
+        if il <= 0 or rl > player.level:
+            return False
+        if c == 2:  # weapon
+            return sc in WEAPONS.get(player.class_id, set()) or sc in (14, 20)
+        if c == 4:  # armor
+            if sc == 6:  # shield: only classes that can wear one
+                return player.class_id in SHIELD_CLASSES
+            if sc == 0:  # misc armor (rings, cloaks, trinkets): every class
+                return True
+            if 1 <= sc <= 4:  # cloth, leather, mail, plate
+                return sc <= best_armor(player.class_id, player.level)
+            return False
+        return False
+
+    def _gear_next(self, polish: str) -> tuple[str, str]:
+        """Quests whose rewards look like a likely upgrade: approximate, no slot or stats guessed."""
+        world = self.world_getter()
+        if world is None:
+            return "Nie mam jeszcze bazy questów. Zbuduj ją: python -m wvt.kb.build.", ""
+        player = self._player()
+        if not player.level:
+            return "Nie znam jeszcze twojego poziomu – daj mi chwilę po wejściu do gry.", ""
+        avg, worn_count = self._worn_item_level()
+        pos = self.quests.pos
+        st = self.state
+        zone = (st.zone or st.subzone) if st is not None else ""
+        area = world.find_area(zone) if zone else 0
+        if not area and pos is not None and getattr(pos, "map_id", 0):
+            area = world.zone_of_map(pos.map_id)
+        zone_name = (world.names.get(area, "") if area else "") or zone
+
+        def best_reward(qd: dict):
+            best = None
+            for iid in qd.get("rw", []) or []:
+                rec = world.all_items.get(iid)
+                if rec is None:
+                    try:
+                        rec = world.all_items.get(int(iid))
+                    except (TypeError, ValueError):
+                        rec = None
+                if rec is None or not self._gear_reward_ok(rec, player):
+                    continue
+                il = int(rec.get("il", 0) or 0)
+                if il <= avg:
+                    continue
+                if best is None or il > best[0]:
+                    best = (il, rec.get("n", "") or "")
+            return best
+
+        best_by_quest: dict[int, tuple[float, float, str, str, str, int, str]] = {}
+
+        def consider(qid: int, title: str, kind: str, dist, loc: str, reward) -> None:
+            il, name = reward
+            cand = (il - avg, dist if dist is not None else 1e9, title, kind, name, il, loc)
+            old = best_by_quest.get(qid)
+            if old is None or cand[0] > old[0]:
+                best_by_quest[qid] = cand
+
+        active = {q.quest_id for q in self.quests.quests()} if self.quests.known else set()
+        if self.quests.known:
+            for q in self.quests.quests():
+                qd = world.quests.get(q.quest_id)
+                if not qd:
+                    continue
+                reward = best_reward(qd)
+                if reward is None:
+                    continue
+                if q.complete:
+                    kind = "oddaj"
+                    spot = world.finisher_spot(q.quest_id, pos)
+                    if spot is not None:
+                        dist = spot.distance
+                        loc = f"u {spot.name}"
+                        where = spot_where(world, spot, pos)
+                        if where:
+                            loc += f", {where}"
+                        if q.zone and q.zone not in loc:
+                            loc += f" ({q.zone})"
+                    else:
+                        dist, loc = None, q.zone or zone_name
+                else:
+                    kind = "w dzienniku"
+                    w = self.quests.where(q)
+                    if w is None:
+                        dist, loc = None, q.zone or zone_name
+                    elif w.other_zone:
+                        dist, loc = None, f"cel w innej strefie: {w.other_zone}"
+                    else:
+                        dist = w.distance_yd
+                        loc = w.polish()
+                        if dist is not None:
+                            loc = f"~{int(round(dist))} yd" + (f" {w.direction}" if w.direction else "")
+                        z = q.zone or zone_name
+                        if z:
+                            loc = f"{z}, {loc}"
+                consider(q.quest_id, q.title, kind, dist, loc, reward)
+
+        if player.done_known and area:
+            for qid, q in world.quests.items():
+                lvl = q.get("lvl") or q.get("min") or 0
+                if lvl and not (player.level - 4 <= lvl <= player.level + 2):
+                    continue
+                if int(q.get("zone") or 0) != area:
+                    continue
+                if not world.available(q, qid, player, active):
+                    continue
+                reward = best_reward(q)
+                if reward is None:
+                    continue
+                spot = world.starter_spot(qid, pos, player.faction)
+                dist = spot.distance if spot is not None and spot.distance is not None else None
+                giver = f"u {spot.name}" if spot is not None else ""
+                loc = ", ".join(x for x in (giver, zone_name) if x)
+                consider(qid, q.get("n") or "", "weź", dist, loc, reward)
+
+        found = sorted(best_by_quest.values(), key=lambda c: (-c[0], c[1]))
+        parts = ["Przybliżone upgrade'y (bez slotu i statystyk nagród):"]
+        if found:
+            for gain, _dist, title, kind, rname, il, loc in found[:6]:
+                bit = f"- {title} ({kind}): {rname}, poz. {il} (+{int(round(gain))})"
+                if loc:
+                    bit += f", {loc}"
+                parts.append(bit)
+        else:
+            parts.append("Nie widzę questów z nagrodami dla Twojej klasy, które byłyby lepsze od tego, co nosisz.")
+        if worn_count:
+            parts.append(f"Średnia Twojego sprzętu: {avg:.1f} ({worn_count} części).")
+        else:
+            parts.append(f"Nie widzę noszonego sprzętu; liczę od poziomu {int(avg)}.")
+        self._sources = [f"gear rewards: {len(found)}"]
+        return " ".join(parts) if not found else "\n".join(parts), ""
 
     def _quest_text(self, kind: str, polish: str, quests: list) -> tuple[str, str]:
         book = self.quests

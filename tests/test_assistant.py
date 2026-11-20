@@ -870,6 +870,12 @@ def carrying_assistant():
     ("czy warto zachować ten miecz?", "item_about"),
     ("gdzie kupię lepszy miecz?", "chat"),  # shopping, not your bags
     ("czy warto robić ten quest?", "quest_worth"),
+    ("jakie questy dają lepszy sprzęt?", "gear_next"),
+    ("gdzie iść po upgrade itemów?", "gear_next"),
+    ("co robić żeby ulepszyć itemy?", "gear_next"),
+    ("lepszy sprzęt?", "gear_next"),
+    ("gdzie iść po lepszy sprzęt?", "gear_next"),
+    ("czy ten kij jest lepszy?", "item_about"),
     ("co mam w plecaku?", "bag_list"),
     ("co mogę sprzedać?", "bag_junk"),
     ("czy mam rhapsody malt?", "bag_count"),
@@ -984,6 +990,68 @@ def test_item_directive_adds_facts_and_the_no_guess_guard():
     system = llm.calls[-1][0]["content"]
     assert "Oily Blackmouth" in system and "Brak danych o recepturach" in system
     assert "Nie dodawaj receptur, cen ani zastosowań, których nie ma w faktach" in system
+
+
+class FakeGearWorld:
+    """Just enough of World for the approximate gear advisor: quests, reward items and spots."""
+
+    names = {10: "Westfall"}
+    all_items = {
+        900: {"n": "Soldier's Sword", "c": 2, "sc": 7, "il": 18, "rl": 10},
+        901: {"n": "Signet Ring", "c": 4, "sc": 0, "il": 17, "rl": 10},  # misc armor: every class
+        902: {"n": "Plate Chest", "c": 4, "sc": 4, "il": 22, "rl": 10},  # too heavy for a low warrior
+        903: {"n": "Rusty Sword", "c": 2, "sc": 7, "il": 8, "rl": 10},  # below the worn average
+    }
+    quests = {
+        501: {"n": "The Deadmines", "lvl": 15, "zone": 10, "rw": [900]},
+        502: {"n": "Signet for a Friend", "lvl": 15, "zone": 10, "rw": [901]},
+        503: {"n": "Wrong Armor", "lvl": 15, "zone": 10, "rw": [902]},
+        504: {"n": "Low Reward", "lvl": 15, "zone": 10, "rw": [903]},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def available(self, q, qid, player, active):
+        return True
+
+    def starter_spot(self, qid, pos, faction):
+        return SimpleNamespace(name="Gryan Stoutmantle", distance=30.0)
+
+    def finisher_spot(self, qid, pos):
+        return None
+
+
+def test_gear_next_suggests_upgrade_rewards_and_skips_bad_ones():
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: FakeGearWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    a._worn_item_level = lambda: (10.0, 5)
+    for i, qid in enumerate((501, 502, 503, 504), start=1):
+        q = FakeGearWorld.quests[qid]
+        a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
+    reply, line = a.handle("gdzie iść po upgrade itemów?")
+    assert line == "" and llm.calls == []
+    assert "Przybliżone" in reply
+    assert "The Deadmines" in reply and "Soldier's Sword" in reply and "+8" in reply
+    assert "Signet for a Friend" in reply and "Signet Ring" in reply  # misc armor fits every class
+    assert "Wrong Armor" not in reply and "Low Reward" not in reply
+    assert "Średnia Twojego sprzętu: 10.0 (5 części)." in reply
+    assert a.transcript[0]["intent"] == "gear_next"
+
+
+def test_gear_help_can_be_turned_off():
+    a, *_ = make_assistant()
+    a.cfg["assistant.gear_help"] = False
+    reply, line = a.handle("gdzie iść po upgrade itemów?")
+    assert line == ""
+    assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
 
 
 def test_quest_worth_text_still_parses_as_a_quest():

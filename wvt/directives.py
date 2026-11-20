@@ -21,6 +21,7 @@ DIRECTIVES: dict[str, str] = {
     "quest_progress": "postęp w queście",
     "quest_info": "informacje o jednym queście (LLM)",
     "quest_worth": "czy warto robić questa",
+    "gear_next": "questy z nagrodami na upgrade (przybliżone)",
     "where_next": "co robić dalej",
     "plan_next": "następny krok planu",
     "stats": "statystyki sesji, expa i złota na godzinę",

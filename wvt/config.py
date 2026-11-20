@@ -49,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
         "knowledge_base": True,  # answer game questions from data/kb (python -m wvt.kb.build)
         "kb_min_score": 0.8,  # cosine similarity a guide fragment needs to count as an answer
         "item_help": True,  # full item facts, comparisons and item routing; false = old item handling
+        "gear_help": True,  # approximate "which quests reward a likely upgrade?" advice
         "reminders_file": "data/reminders.json",
         "flavor": True,  # her character: varied phrasings and her own words for spontaneous comments
         "quest_tips": True,  # say whether a quest you just took is worth it (chain, XP, rewards)

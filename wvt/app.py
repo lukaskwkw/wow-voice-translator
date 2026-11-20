@@ -524,6 +524,10 @@ class MainWindow(QWidget):
         self.item_help_cb.setChecked(bool(cfg.get("assistant.item_help", True)))
         cf.addRow(self.item_help_cb)
 
+        self.gear_help_cb = QCheckBox("Podpowiedzi questów na upgrade sprzętu (przybliżone)")
+        self.gear_help_cb.setChecked(bool(cfg.get("assistant.gear_help", True)))
+        cf.addRow(self.gear_help_cb)
+
         cloud_note = QLabel("Zmiany modelu/routera działają po restarcie aplikacji. "
                             "Jev: OpenRouter 1.14 → OpenCode 1.13; brak klucza danego providera powoduje jego pominięcie. "
                             "OpenRouter wymaga OPENROUTER_API_KEY, OpenCode OPENCODE_API_KEY.")
@@ -696,6 +700,7 @@ class MainWindow(QWidget):
         cfg.set("insert.confirm", self.confirm_edit.isChecked())
         cfg.set("assistant.confirm_transcript", self.assistant_confirm.isChecked())
         cfg.set("assistant.item_help", self.item_help_cb.isChecked())
+        cfg.set("assistant.gear_help", self.gear_help_cb.isChecked())
         cfg.set("hover.enabled", self.hover_enabled.isChecked())
         cfg.set("hover.font_scale", round(self.font_scale.value(), 2))
         cfg.set("voice.local.enabled", self.local_tts.isChecked())
@@ -1333,9 +1338,10 @@ class TranslatorApp:
     def directive_items(self) -> list:
         """Rule kinds for the ``{`` popup: one Suggestion per whitelisted directive."""
         item_help = bool(self.cfg.get("assistant.item_help", True))
+        gear_help = bool(self.cfg.get("assistant.gear_help", True))
         return [Suggestion(kind, "Reguła", description, kind, 0.0)
                 for kind, description in DIRECTIVES.items()
-                if item_help or kind != "item_compare"]
+                if (item_help or kind != "item_compare") and (gear_help or kind != "gear_next")]
 
     def _ensure_history_overlay(self) -> HistoryOverlay:
         if self.history_overlay is None:
