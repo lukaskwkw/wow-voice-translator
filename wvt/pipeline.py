@@ -57,6 +57,7 @@ class PushToTalkPipeline:
         self.confirm_assistant = confirm_assistant
         self._pending_confirm: HistoryItem | None = None
         self._pending_assistant: tuple[str, dict] | None = None
+        self._skip_rules = False  # the next assistant question goes to chat only (no rules, no Jev)
         self.history: deque[HistoryItem] = deque(maxlen=10)
         self._busy = threading.Lock()
         self._recording_channel: Optional[str] = None
@@ -66,6 +67,21 @@ class PushToTalkPipeline:
         self.assistant = None  # wvt.assistant.Assistant: the "assistant" push-to-talk channel goes to her
         self.chat_log = None  # wvt.assistant.ChatLog: recent chat, the context of what you say next
         self.lexicon = None  # wvt.lexicon.Lexicon: the names of the moment (Whisper's prompt, name fixes)
+
+    def arm_skip_rules(self) -> None:
+        """The next assistant question goes to chat only: no local rules, no Jev."""
+        self._skip_rules = True
+
+    def clear_skip_rules(self) -> None:
+        self._skip_rules = False
+
+    @property
+    def skip_rules_pending(self) -> bool:
+        return self._skip_rules
+
+    def _take_skip_rules(self) -> bool:
+        skip, self._skip_rules = self._skip_rules, False
+        return skip
 
     def _prompt(self) -> str:
         if self.lexicon is None or not getattr(self.stt, "prompt_ok", False):
@@ -211,7 +227,7 @@ class PushToTalkPipeline:
                     return None
                 self.ui.status("busy", f"{self._channel_label(channel)} myśli…", [f"PL: {polish}"])
                 t1 = time.perf_counter()
-                reply, line = self.assistant.handle(polish)
+                reply, line = self.assistant.handle(polish, force_chat=self._take_skip_rules())
                 timings["assistant_ms"] = round((time.perf_counter() - t1) * 1000)
                 self.last_timings = timings
                 corr = getattr(self.assistant, "last_correction", None)
@@ -361,7 +377,8 @@ class PushToTalkPipeline:
         try:
             self.ui.status("busy", f"{self._channel_label('assistant')} myśli…", [f"PL: {edited}"])
             t1 = time.perf_counter()
-            reply, line = self.assistant.handle(edited)  # speaks and inserts the command line herself
+            reply, line = self.assistant.handle(  # speaks and inserts the command line herself
+                edited, force_chat=self._take_skip_rules())
             timings["assistant_ms"] = round((time.perf_counter() - t1) * 1000)
             self.last_timings = timings
             corr = getattr(self.assistant, "last_correction", None)
@@ -400,7 +417,7 @@ class PushToTalkPipeline:
                 return None
             self.ui.status("busy", f"{self._channel_label('assistant')} myśli…", [f"PL: {text}"])
             t1 = time.perf_counter()
-            reply, line = self.assistant.handle(text)
+            reply, line = self.assistant.handle(text, force_chat=self._take_skip_rules())
             timings = {"assistant_ms": round((time.perf_counter() - t1) * 1000)}
             self.last_timings = timings
             corr = getattr(self.assistant, "last_correction", None)

@@ -39,10 +39,12 @@ class FakeUI:
 class FakeAssistant:
     def __init__(self):
         self.calls = []
+        self.forced = []
         self.last_correction = None
 
-    def handle(self, polish):
+    def handle(self, polish, force_chat=False):
         self.calls.append(polish)
+        self.forced.append(force_chat)
         return "reply", ""
 
 
@@ -67,6 +69,7 @@ def make_pipeline(pending=("stary", {"stt_ms": 100})):
     p._busy = threading.Lock()
     p._pending_confirm = None
     p._pending_assistant = pending
+    p._skip_rules = False
     p.history = deque(maxlen=10)
     p.last_timings = {}
     p.lexicon = None
@@ -201,3 +204,33 @@ def test_ask_assistant_refused_while_transcript_pending():
     assert p.ask_assistant("pytanie") is None
     assert p.assistant.calls == []
     assert p.ui.statuses[-1] == ("busy", "Dokończ edycję tekstu…")
+
+
+def test_arm_skip_rules_forces_the_next_question_to_chat_only():
+    p = make_pipeline(pending=None)
+
+    p.arm_skip_rules()
+    assert p.skip_rules_pending is True
+
+    p.ask_assistant("pytanie")
+
+    assert p.assistant.calls == ["pytanie"]
+    assert p.assistant.forced == [True]  # the next question went straight to chat
+    assert p.skip_rules_pending is False  # one shot only
+
+    p.ask_assistant("drugie pytanie")
+
+    assert p.assistant.forced == [True, False]
+
+
+def test_clear_skip_rules_leaves_the_next_question_normal():
+    p = make_pipeline(pending=None)
+
+    p.arm_skip_rules()
+    p.clear_skip_rules()
+
+    assert p.skip_rules_pending is False
+
+    p.ask_assistant("pytanie")
+
+    assert p.assistant.forced == [False]

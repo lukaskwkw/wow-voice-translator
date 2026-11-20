@@ -46,12 +46,16 @@ class HistoryOverlay(QDialog):
 
     closed = Signal()
 
-    def __init__(self, items_getter, clear_callback, cfg, on_ask=None, parent=None):
+    def __init__(self, items_getter, clear_callback, cfg, on_ask=None, on_skip=None, skip_pending=None,
+                 on_prompt=None, parent=None):
         super().__init__(parent)
         self._items_getter = items_getter
         self._clear_callback = clear_callback
         self.cfg = cfg
         self._on_ask = on_ask
+        self._on_skip = on_skip
+        self._skip_pending = skip_pending
+        self._on_prompt = on_prompt
         self.setWindowTitle("Iskra – historia rozmów")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -70,8 +74,13 @@ class HistoryOverlay(QDialog):
         self.ask.returnPressed.connect(self._send)
         b_send = QPushButton("Wyślij")
         b_send.clicked.connect(self._send)
+        self.b_skip = QPushButton("Bez reguł")
+        self.b_skip.setCheckable(True)
+        self.b_skip.setToolTip("Następne pytanie pójdzie do rozmowy bez reguł i bez Jev (jednorazowo)")
+        self.b_skip.toggled.connect(self._toggle_skip)
         ask_row.addWidget(self.ask, 1)
         ask_row.addWidget(b_send)
+        ask_row.addWidget(self.b_skip)
         lay.addLayout(ask_row)
 
         row = QHBoxLayout()
@@ -79,10 +88,13 @@ class HistoryOverlay(QDialog):
         b_clear.clicked.connect(self._on_clear)
         b_copy = QPushButton("Kopiuj")
         b_copy.clicked.connect(self._copy_selection)
+        self.b_prompt = QPushButton("Prompt")
+        self.b_prompt.clicked.connect(self._show_prompt)
         b_close = QPushButton("Zamknij")
         b_close.clicked.connect(self.close)
         row.addWidget(b_clear)
         row.addWidget(b_copy)
+        row.addWidget(self.b_prompt)
         row.addStretch(1)
         row.addWidget(b_close)
         lay.addLayout(row)
@@ -100,6 +112,10 @@ class HistoryOverlay(QDialog):
         limit = int(self.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.cfg.get("assistant.name", "Iskra") or "Iskra")
         update_history_view(self.view, render_history_html(items, limit, name), force)
+        if self.b_skip.isChecked() and self._skip_pending is not None and not self._skip_pending():
+            self.b_skip.blockSignals(True)
+            self.b_skip.setChecked(False)
+            self.b_skip.blockSignals(False)
 
     def _on_clear(self) -> None:
         try:
@@ -122,6 +138,27 @@ class HistoryOverlay(QDialog):
             return
         try:
             self._on_ask(text)
+        except Exception:
+            pass
+
+    def _toggle_skip(self, checked: bool) -> None:
+        if self._on_skip is None:
+            self.b_skip.blockSignals(True)
+            self.b_skip.setChecked(False)
+            self.b_skip.blockSignals(False)
+            return
+        try:
+            self._on_skip(checked)
+        except Exception:
+            self.b_skip.blockSignals(True)
+            self.b_skip.setChecked(False)
+            self.b_skip.blockSignals(False)
+
+    def _show_prompt(self) -> None:
+        if self._on_prompt is None:
+            return
+        try:
+            self._on_prompt()
         except Exception:
             pass
 

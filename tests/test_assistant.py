@@ -844,3 +844,68 @@ def test_speak_stays_silent_without_any_voice_id():
     a, ins, ui, voice, _ = make_assistant(voice_id="")
     a._speak("Cześć.")
     assert voice.said == [] and a._warned_no_voice is True
+
+
+# --------------------------------------------------------------------------- what exactly goes to the model
+
+def test_last_prompt_text_shows_the_header_and_every_message():
+    a = Assistant.__new__(Assistant)
+    a.last_llm_request = {"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}],
+                          "max_tokens": 300, "temperature": 0.8, "thinking": "low"}
+    a._last_llm = {"provider": "openai", "model": "m", "variant": "low", "ms": 12}
+
+    text = a.last_prompt_text()
+
+    assert "provider=openai" in text and "model=m" in text and "variant=low" in text and "ms=12" in text
+    assert "max_tokens=300" in text and "temperature=0.8" in text and "thinking=low" in text
+    assert "[system]\nS" in text and "[user]\nU" in text
+
+
+def test_last_prompt_text_is_empty_without_a_request():
+    a = Assistant.__new__(Assistant)
+    a.last_llm_request = None
+    assert a.last_prompt_text() == ""
+
+
+def test_llm_text_keeps_the_exact_messages_it_sent():
+    class Recorder:
+        supports_thinking = False
+        model_name = "y"
+
+        def __init__(self):
+            self.sent = []
+
+        def chat(self, messages, max_tokens=120, temperature=0.0, stop=None, timeout=None, **kw):
+            self.sent.append(messages)
+            return "ok", {"provider": "x", "model": "y", "variant": "z", "ms": 1}
+
+    a = Assistant.__new__(Assistant)
+    a.llm = Recorder()
+    a.cfg = Cfg({"assistant.max_reply_chars": 240})
+    a._last_llm = {}
+    msgs = [{"role": "user", "content": "hej"}]
+
+    assert a._llm_text(msgs, max_tokens=42, temperature=0.1) == "ok"
+
+    assert a.last_llm_request["messages"] == [{"role": "user", "content": "hej"}]
+    assert a.last_llm_request["max_tokens"] == 42
+    assert a.last_llm_request["temperature"] == 0.1
+    assert a.llm.sent == [msgs]
+
+
+def test_force_chat_skips_the_rules_and_jev(monkeypatch):
+    a, *_ = make_assistant()
+
+    class ExplodingRouter:
+        def classify(self, text, criteria):
+            raise AssertionError("Jev must not be consulted when the rules are skipped")
+
+    a.router = ExplodingRouter()
+    monkeypatch.setattr("wvt.assistant.parse_intent",
+                        lambda text: (_ for _ in ()).throw(AssertionError("local rules must be skipped")))
+
+    reply, line = a.handle("jak leci quest?", force_chat=True)
+
+    assert reply and line == ""
+    assert a.transcript[0]["route"] == "forced-chat"
+    assert a.transcript[0]["intent"] == "chat"

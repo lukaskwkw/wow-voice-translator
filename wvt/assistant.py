@@ -701,6 +701,7 @@ class Assistant:
         self._journal_lock = threading.Lock()
         self._sources: list[str] = []  # where the last answer came from (for the journal)
         self._last_llm: dict = {}  # provider/model/variant of the last successful LLM call
+        self.last_llm_request: Optional[dict] = None  # exact messages of the last LLM call, memory only
         self.translator = translator
         self.llm = llm
         self.router = jev_router(cfg)  # Jev decision model when the local rules miss (assistant.router)
@@ -1032,18 +1033,25 @@ class Assistant:
                  decision.label, decision.provider, decision.confidence, decision.ms)
         return intent_from_label(decision.label, text, tuple(self._known_names()))
 
-    def handle(self, polish: str) -> tuple[str, str]:
-        """React to one utterance.  Returns (spoken answer, chat line prepared or "")."""
+    def handle(self, polish: str, force_chat: bool = False) -> tuple[str, str]:
+        """React to one utterance.  Returns (spoken answer, chat line prepared or "").
+
+        ``force_chat``: the next question goes straight to chat - no local rules, no Jev.
+        """
         t0 = time.perf_counter()
         self._last_llm = {}
+        self.last_llm_request = None
         corr = self._correct(polish)
         self.last_correction = corr
         text = corr.text
-        local = parse_intent(text)
+        local = Intent("chat") if force_chat else parse_intent(text)
         local_kind = local.kind
         intent = local
         route = "rules" if local_kind != "chat" else "chat"
-        if intent.kind == "chat" and self.router is not None:
+        if force_chat:
+            local_kind = "skipped"
+            route = "forced-chat"
+        elif intent.kind == "chat" and self.router is not None:
             routed = self._route_intent(text)
             if routed is not None:
                 intent = routed
@@ -1458,6 +1466,12 @@ class Assistant:
         if self.llm is None:
             return ""
         kw = {"thinking": thinking} if thinking and getattr(self.llm, "supports_thinking", False) else {}
+        self.last_llm_request = {
+            "messages": [dict(m) for m in messages],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "thinking": thinking,
+        }
         try:
             text, meta = self.llm.chat(messages, max_tokens=max_tokens, temperature=temperature,
                                        timeout=float(self.cfg.get("assistant.llm_timeout_s", 8)), **kw)
@@ -1484,6 +1498,36 @@ class Assistant:
         log.info("assistant LLM: provider=%s model=%s variant=%s fallback=%s finish=%s%s %d ms",
                  provider, model, variant, fallback, finish, extra, ms)
         return clean_reply(text, limit or int(self.cfg.get("assistant.max_reply_chars", 240)))
+
+    def last_prompt_text(self) -> str:
+        """What exactly went to the model last time, for the UI. Memory only, never logged."""
+        req = self.last_llm_request
+        if req is None:
+            return ""
+        m = self._last_llm or {}
+
+        def val(v) -> str:
+            return "?" if v is None or v == "" else str(v)
+
+        ms = m.get("ms")
+        if ms is None and m.get("seconds") is not None:
+            try:
+                ms = round(float(m["seconds"]) * 1000)
+            except (TypeError, ValueError):
+                ms = None
+        parts = [f"provider={val(m.get('provider'))}", f"model={val(m.get('model'))}",
+                 f"variant={val(m.get('variant'))}", f"ms={val(ms)}",
+                 f"max_tokens={val(req.get('max_tokens'))}", f"temperature={val(req.get('temperature'))}"]
+        if req.get("thinking"):
+            parts.append(f"thinking={req['thinking']}")
+        out = " ".join(parts)
+        for msg in req.get("messages") or []:
+            out += f"\n\n[{msg.get('role') or '?'}]\n{msg.get('content') or ''}"
+        limit = 60000
+        if len(out) > limit:
+            marker = "\n[... ucieto ...]"
+            out = out[:limit - len(marker)] + marker
+        return out
 
     def _long_limit(self) -> int:
         return int(self.cfg.get("assistant.max_knowledge_chars", 480))

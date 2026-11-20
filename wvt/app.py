@@ -254,6 +254,9 @@ class MainWindow(QWidget):
         b_clear = QPushButton("Wyczyść historię")
         b_clear.clicked.connect(self.on_clear_assistant_history)
         row.addWidget(b_clear)
+        b_prompt = QPushButton("Ostatni prompt")
+        b_prompt.clicked.connect(self.app.show_last_prompt)
+        row.addWidget(b_prompt)
         row.addStretch(1)
         lay.addLayout(row)
         timer = QTimer(self)
@@ -774,6 +777,7 @@ class TranslatorApp:
         self.model_state = "ładowanie…"
         self._confirm_dialog = None
         self._assistant_confirm_dialog = None
+        self._prompt_dialog = None
         self.hover_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wvt-hover")
         self._hover_current = None
         self._hover_window: Optional[WowWindow] = None
@@ -1237,7 +1241,9 @@ class TranslatorApp:
             self.history_overlay = HistoryOverlay(
                 lambda: self.assistant.transcript_items() if self.assistant else [],
                 self._clear_assistant_history, self.cfg,
-                on_ask=self._ask_from_history)
+                on_ask=self._ask_from_history,
+                on_skip=self._arm_skip_rules, skip_pending=self._skip_pending,
+                on_prompt=self.show_last_prompt)
             self.history_overlay.closed.connect(self._on_history_closed)
         return self.history_overlay
 
@@ -1296,6 +1302,41 @@ class TranslatorApp:
         except Exception:
             pass
         QTimer.singleShot(250, run)
+
+    def _skip_pending(self) -> bool:
+        return bool(self.pipeline is not None and self.pipeline.skip_rules_pending)
+
+    def _arm_skip_rules(self, on: bool) -> None:
+        if self.pipeline is None:
+            self._on_status("busy", "Modele jeszcze się ładują…", [self.model_state], 2.5)
+            return
+        if on:
+            self.pipeline.arm_skip_rules()
+            self._on_status("info", "Następne pytanie bez reguł (bez Jev)", [], 2.0)
+        else:
+            self.pipeline.clear_skip_rules()
+
+    def show_last_prompt(self) -> None:
+        if self.assistant is None:
+            self._on_status("busy", "Asystentka jest wyłączona", [], 2.0)
+            return
+        from .prompt_dialog import PromptDialog
+
+        text = self.assistant.last_prompt_text()
+        if not text:
+            text = "Ostatnia odpowiedź nie użyła modelu (reguły / dane z gry)."
+        items = self.assistant.transcript_items()
+        first = ""
+        if items:
+            it = items[0]
+            sources = ", ".join(str(s) for s in (it.get("sources") or [])) or "-"
+            first = f"intent={it.get('intent', '')} route={it.get('route', '')} sources={sources}\n"
+        if self._prompt_dialog is None:
+            self._prompt_dialog = PromptDialog()
+        self._prompt_dialog.set_text(first + text)
+        self._prompt_dialog.show()
+        self._prompt_dialog.raise_()
+        self._prompt_dialog.activateWindow()
 
     def quit(self) -> None:
         try:

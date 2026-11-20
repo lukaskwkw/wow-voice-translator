@@ -257,6 +257,8 @@ Questions like „co jeszcze mogę zrobić?”, „co jeszcze mogę zrobić po t
 - The overlay opens on the right of the screen a moment after start-up when `assistant.history_overlay` is on. Turn it on or off from the tray ("Historia rozmów Iskry") or with the Settings checkbox "Pokaż overlay z historią rozmów nad grą"; `assistant.history_limit` (5-30) sets how many entries both views show.
 - The overlay is a normal window: you can scroll it and close it, and it does not take focus from the game when it appears. It also stays visible while the app window is hidden in the tray.
 - You can type a question straight into the overlay's input and press Enter or "Wyślij" (no push-to-talk). It uses the same game context the app already has from the addon (state, quests, chat), so nothing extra is sent to the addon. The answer shows up in the transcript and the HUD; if she prepares a command, it waits in the WoW chat box and you still press Enter to send it.
+- "Prompt" (in the overlay and the `Iskra` tab) shows exactly what was sent to the model last time: the system prompt, the recent turns and your question. It is read from memory only - nothing is written to the logs.
+- "Bez reguł" (next to the overlay's input) arms the next question to skip the local rules and Jev, so a follow-up that would otherwise turn into `quest_worth` and the like goes straight to the conversation instead. It is one-shot: it clears itself after that one question.
 - This needs no addon changes and no addon reinstall.
 
 ### Logs: where did the answer come from?
