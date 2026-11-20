@@ -60,8 +60,10 @@ DEFAULTS: dict[str, Any] = {
         "plan_thinking": "low",
         "max_knowledge_chars": 480,  # answers from the guides and the quest base may be longer than small talk
         "log_file": "logs/assistant.jsonl",  # what you asked and what she answered (privacy.log_assistant)
+        "context_log_file": "logs/context_history.jsonl",  # full LLM messages (privacy.log_llm_context)
         "history_overlay": True,  # always-on-top conversation history over WoW
         "history_limit": 10,      # entries shown in the overlay/tab
+        "autocomplete": True,  # "[" suggestions in the Iskra inputs; false disables the popup
         # assistant.llm: local | gemini | openai - with gemini she talks through Google Gemini (key in .env, section
         # "gemini"), with openai through any OpenAI-compatible cloud API (section "assistant.openai"); translations
         # stay local and the local model answers whenever the cloud fails
@@ -210,6 +212,7 @@ DEFAULTS: dict[str, Any] = {
     "privacy": {
         "log_texts": False,  # transcripts/translations are not written to logs by default
         "log_assistant": False,  # true: questions to the assistant and her answers go to assistant.log_file
+        "log_llm_context": False,  # true: every full prompt sent to the assistant LLM goes to assistant.context_log_file
         "keep_history": True,  # last 10 PTT translations kept in memory (never on disk)
     },
     "logging": {"level": "INFO", "dir": "logs"},

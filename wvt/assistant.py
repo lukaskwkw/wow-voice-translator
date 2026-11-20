@@ -58,6 +58,7 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -695,10 +696,14 @@ class Assistant:
                  chat_log: Optional["ChatLog"] = None, quests: Optional[QuestBook] = None,
                  world_getter: Callable[[], object] = lambda: None, kb_getter: Callable[[], object] = lambda: None,
                  instances_getter: Callable[[], list] = lambda: [], reminders_path=None, journal_path=None,
-                 lexicon: Optional[Lexicon] = None, remote_embedder=None):
+                 lexicon: Optional[Lexicon] = None, remote_embedder=None, context_path=None):
         self.cfg = cfg
         self.journal_path = Path(journal_path) if journal_path else None
         self._journal_lock = threading.Lock()
+        self.context_path = Path(context_path) if context_path else None
+        self._context_lock = threading.Lock()
+        self._turn_id = ""              # one id per handle() question
+        self._turn_context_ids: list[str] = []  # ids written to context_history.jsonl for this turn
         self._sources: list[str] = []  # where the last answer came from (for the journal)
         self._last_llm: dict = {}  # provider/model/variant of the last successful LLM call
         self.last_llm_request: Optional[dict] = None  # exact messages of the last LLM call, memory only
@@ -1039,6 +1044,9 @@ class Assistant:
         ``force_chat``: the next question goes straight to chat - no local rules, no Jev.
         """
         t0 = time.perf_counter()
+        turn_id = uuid.uuid4().hex[:12]
+        self._turn_id = turn_id
+        self._turn_context_ids = []
         self._last_llm = {}
         self.last_llm_request = None
         corr = self._correct(polish)
@@ -1077,6 +1085,7 @@ class Assistant:
                        "intent": final,
                        "route": route, "llm": dict(self._last_llm),
                        "reply": reply, "line": line, "sources": self._sources,
+                       "turn": turn_id, "context_refs": list(self._turn_context_ids),
                        "ms": ms,
                        "zone": st.zone if st else "", "level": st.level if st else 0})
         self.transcript.appendleft({
@@ -1092,6 +1101,7 @@ class Assistant:
             "ms": ms,
         })
         self._respond(reply, line, status, event="")
+        self._turn_id = ""
         return reply, line
 
     def transcript_items(self) -> list[dict]:
@@ -1186,6 +1196,32 @@ class Assistant:
                     fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as exc:
             log.debug("assistant journal not written: %s", exc)
+
+    def _log_context(self, request, meta, error: str = "") -> str:
+        """One exact LLM request, one JSON line (privacy.log_llm_context); never raises, never the answer."""
+        if getattr(self, "context_path", None) is None or not request:
+            return ""
+        ctx_id = uuid.uuid4().hex[:12]
+        turn = getattr(self, "_turn_id", "")
+        call = len(self._turn_context_ids) + 1 if turn else 1
+        entry = {
+            "t": time.strftime("%Y-%m-%d %H:%M:%S"), "id": ctx_id, "turn": turn, "call": call,
+            "event": not bool(turn), "messages": request.get("messages") or [],
+            "max_tokens": request.get("max_tokens"), "temperature": request.get("temperature"),
+            "thinking": request.get("thinking") or "", "llm": dict(meta) if isinstance(meta, dict) else {},
+            "error": (error or "")[:300],
+        }
+        try:
+            with self._context_lock:
+                self.context_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.context_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            log.debug("assistant context not written: %s", exc)
+            return ""
+        if turn:
+            self._turn_context_ids.append(ctx_id)
+        return ctx_id
 
     def _dispatch(self, it: Intent, polish: str) -> tuple[str, str]:
         k = it.kind
@@ -1477,6 +1513,7 @@ class Assistant:
                                        timeout=float(self.cfg.get("assistant.llm_timeout_s", 8)), **kw)
         except Exception as exc:
             log.info("assistant LLM failed: %s", type(exc).__name__)
+            self._log_context(self.last_llm_request, {}, f"{type(exc).__name__}: {exc}")
             return ""
         self._last_llm = dict(meta) if isinstance(meta, dict) else {}
         m = self._last_llm
@@ -1497,6 +1534,7 @@ class Assistant:
             extra = f" fallback_from={m.get('primary_model')}"
         log.info("assistant LLM: provider=%s model=%s variant=%s fallback=%s finish=%s%s %d ms",
                  provider, model, variant, fallback, finish, extra, ms)
+        self._log_context(self.last_llm_request, self._last_llm)
         return clean_reply(text, limit or int(self.cfg.get("assistant.max_reply_chars", 240)))
 
     def last_prompt_text(self) -> str:

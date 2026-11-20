@@ -259,7 +259,7 @@ Questions like „co jeszcze mogę zrobić?”, „co jeszcze mogę zrobić po t
 - You can type a question straight into the overlay's input and press Enter or "Wyślij" (no push-to-talk). It uses the same game context the app already has from the addon (state, quests, chat), so nothing extra is sent to the addon. The answer shows up in the transcript and the HUD; if she prepares a command, it waits in the WoW chat box and you still press Enter to send it.
 - "Prompt" (in the overlay and the `Iskra` tab) shows exactly what was sent to the model last time: the system prompt, the recent turns and your question. It is read from memory only - nothing is written to the logs.
 - "Bez reguł" (next to the overlay's input) arms the next question to skip the local rules and Jev, so a follow-up that would otherwise turn into `quest_worth` and the like goes straight to the conversation instead. It is one-shot: it clears itself after that one question.
-- **`[` autocomplete (overlay and the `Iskra` tab input).** Type `[` and a popup lists names the app already knows: quests in your journal, turn-ins, quests available to take, every QuestieDB quest name, NPCs, zones, dungeons, items and your party members. Arrow keys pick, Enter or Tab inserts `[Name]`, Esc closes the list. Outside the brackets no popup appears and nothing is auto-inserted; the list lives in memory only and is never logged.
+- **`[` autocomplete (overlay and the `Iskra` tab input).** Type `[` and a popup lists names the app already knows: quests in your journal, turn-ins, quests available to take, every QuestieDB quest name, NPCs, zones, dungeons, items and your party members. Arrow keys pick, Enter or Tab inserts `[Name]`, Esc closes the list. Outside the brackets no popup appears and nothing is auto-inserted; the list lives in memory only and is never logged. It can be turned off in Settings ("Podpowiedzi po [ w polach Iskry (questy, NPC, miejsca)"; config `assistant.autocomplete`).
 - This needs no addon changes and no addon reinstall.
 
 ### Logs: where did the answer come from?
@@ -273,10 +273,47 @@ assistant LLM: provider=openai model=deepseek-v4.1-flash variant=low fallback=Fa
 assistant LLM: provider=local model=Nemotron variant=thinking-off fallback=True fallback_from=deepseek-v4.1-flash finish=stop 640 ms
 ```
 
-- `local` is what the local rules understood, `route` is `rules`, `chat` or `jev`, and `final` is the intent that answered.
+- `local` is what the local rules understood, `route` is `rules`, `chat`, `forced-chat` (the question skipped the rules) or `jev`, and `final` is the intent that answered.
 - `fallback=True` means the cloud model failed and the local model answered; `fallback_from` names the cloud model.
 - `variant` is the thinking level for Gemini/OpenAI-compatible models, or `thinking-off` for the local model.
 - The text of questions and answers stays out of the log unless `privacy.log_assistant` is on; token usage is logged only at `logging.level: "DEBUG"`.
+
+#### Full prompt history (`context_history.jsonl`)
+
+Two separate, opt-in files answer "where did the answer come from?":
+
+- `privacy.log_assistant: true` writes `assistant.log_file` (default `logs/assistant.jsonl`): one JSON line per question, with `heard`, `intent`, `route`, `llm` (provider/model/variant), `reply`, `sources`, `turn` and `context_refs`.
+- `privacy.log_llm_context: true` writes `assistant.context_log_file` (default `logs/context_history.jsonl`): one JSON line per **assistant answer LLM call**, with `id`, `turn`, `call`, `event`, the full `messages` (system prompt, the recent turns, your question), `max_tokens`, `temperature`, `thinking`, the `llm` metadata and `error` (empty unless the call failed).
+
+Joining them:
+
+- `context_refs` in `assistant.jsonl` are `id`s in `context_history.jsonl` - the exact prompts that produced that answer.
+- `turn` groups every LLM call of one answer (a question can take more than one call, e.g. a knowledge answer); `call` numbers them 1, 2, ...
+- A rule-only answer (gold, bags, invites...) has an empty `context_refs` and no context line.
+- Spontaneous comments (a zone, a level up) have `event: true` and `turn: ""`.
+- Context logging covers the **assistant answer model only** - not the translator and not the Jev router.
+
+Python:
+
+```python
+import json
+
+journal = [json.loads(l) for l in open("logs/assistant.jsonl", encoding="utf-8")]
+context = {r["id"]: r for r in (json.loads(l) for l in open("logs/context_history.jsonl", encoding="utf-8"))}
+
+for row in journal:
+    print(row["heard"], "->", row["route"], row["intent"])
+    for ref in row["context_refs"]:
+        print("   ", context[ref]["messages"][-1]["content"], context[ref]["llm"])
+```
+
+PowerShell, last prompt only:
+
+```powershell
+Get-Content logs\context_history.jsonl -Tail 1 | ConvertFrom-Json | Select-Object -ExpandProperty messages
+```
+
+Both files are private and off by default. They grow until you delete them - turn them on to debug a wrong answer, then turn them off again. Changes to `privacy.log_assistant`, `privacy.log_llm_context` or the log file paths apply after restarting the app, because the assistant opens those files at startup.
 
 ## Configuration
 

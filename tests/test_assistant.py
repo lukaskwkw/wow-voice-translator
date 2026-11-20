@@ -1,5 +1,6 @@
 """Voice assistant: intents from Polish speech, invite requests in chat, group commands, answers."""
 
+import json
 import time
 
 import pytest
@@ -634,6 +635,54 @@ def test_the_journal_keeps_questions_answers_and_comments(tmp_path):
     assert rows[1]["reply"] == llm.answer and rows[2]["reply"] == "Torby pełne."
     b, *_ = make_assistant()  # without a path nothing is written anywhere
     b.handle("ile mam złota?")
+
+
+def test_journal_links_to_full_llm_context(tmp_path):
+    journal = tmp_path / "assistant.jsonl"
+    context = tmp_path / "context_history.jsonl"
+    a, ins, ui, voice, llm = make_assistant(journal_path=journal, context_path=context)
+    a.handle("jak się masz?")
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    ctx = [json.loads(line) for line in context.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1 and len(ctx) == 1
+    assert rows[0]["route"] == "chat"
+    assert rows[0]["turn"] == ctx[0]["turn"]
+    assert rows[0]["context_refs"] == [ctx[0]["id"]]
+    assert ctx[0]["messages"][-1] == {"role": "user", "content": "jak się masz?"}
+    assert any(m.get("role") == "system" for m in ctx[0]["messages"])
+    assert ctx[0]["turn"] == rows[0]["turn"]
+    assert ctx[0]["event"] is False
+    assert ctx[0]["call"] == 1
+    assert "reply" not in ctx[0]  # the journal keeps the answer, never the context file
+
+
+def test_rules_answer_has_no_context_refs(tmp_path):
+    journal = tmp_path / "assistant.jsonl"
+    context = tmp_path / "context_history.jsonl"
+    a, *_ = make_assistant(journal_path=journal, context_path=context)
+    a.handle("co umiesz")
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["context_refs"] == []
+    assert not context.exists() or not context.read_text(encoding="utf-8").strip()
+
+
+def test_failed_llm_call_is_logged_with_error(tmp_path):
+    journal = tmp_path / "assistant.jsonl"
+    context = tmp_path / "context_history.jsonl"
+
+    class FailingLLM:
+        def chat(self, messages, max_tokens=120, temperature=0.0, stop=None, timeout=None):
+            raise RuntimeError("boom")
+
+    a, *_ = make_assistant(journal_path=journal, context_path=context)
+    a.llm = FailingLLM()
+    a.handle("jak się masz?")
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    ctx = [json.loads(line) for line in context.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["route"] == "chat"
+    assert len(ctx) == 1 and "boom" in ctx[0]["error"]
+    assert ctx[0]["id"] in rows[0]["context_refs"]
 
 
 def test_the_transcript_for_the_ui_keeps_question_and_answer():

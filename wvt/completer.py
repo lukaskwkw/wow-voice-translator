@@ -20,10 +20,11 @@ __all__ = ["BracketCompleter"]
 class BracketCompleter(QObject):
     """Show ``[`` suggestions for ``edit``; ``items_getter()`` returns ``Suggestion`` objects."""
 
-    def __init__(self, edit: QLineEdit, items_getter, parent=None):
+    def __init__(self, edit: QLineEdit, items_getter, enabled=None, parent=None):
         super().__init__(parent)
         self.edit = edit
         self._items_getter = items_getter
+        self._enabled = enabled
         self._applying = False
         self._pending = False
         self._snapshot = (edit.text(), edit.cursorPosition())
@@ -56,6 +57,14 @@ class BracketCompleter(QObject):
         if popup is not None:
             popup.hide()
 
+    def _is_enabled(self) -> bool:
+        if self._enabled is None:
+            return True
+        try:
+            return bool(self._enabled())
+        except Exception:
+            return True
+
     # ------------------------------------------------------------------ model
     def _fill(self, matches) -> None:
         self._model.clear()
@@ -74,6 +83,10 @@ class BracketCompleter(QObject):
 
     def _update(self, *_args) -> None:
         if self._applying:
+            return
+        if not self._is_enabled():
+            self._clear_rows()
+            self.hide_popup()
             return
         text = self.edit.text()
         cursor = self.edit.cursorPosition()
@@ -107,6 +120,9 @@ class BracketCompleter(QObject):
     # ------------------------------------------------------------------ keyboard
     def eventFilter(self, obj, event):  # noqa: N802 - Qt override
         if obj is not self.edit or event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(obj, event)
+        if not self._is_enabled():
+            self.hide_popup()
             return super().eventFilter(obj, event)
         if not self.popup_visible():
             return super().eventFilter(obj, event)
@@ -147,6 +163,9 @@ class BracketCompleter(QObject):
 
     # ------------------------------------------------------------------ insertion
     def _insert(self, chosen) -> None:
+        if not self._is_enabled():
+            self.hide_popup()
+            return
         if isinstance(chosen, QModelIndex):
             name = chosen.data(Qt.ItemDataRole.UserRole)
         else:

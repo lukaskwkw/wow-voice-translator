@@ -75,7 +75,10 @@ class HistoryOverlay(QDialog):
         self.ask.setPlaceholderText("Napisz do Iskry…")
         self.ask.setToolTip("Wpisz [ aby wybrać quest, NPC lub miejsce z danych gry")
         self.ask.returnPressed.connect(self._send)
-        self._completer = BracketCompleter(self.ask, suggestions, self) if suggestions is not None else None
+        self._completer = (BracketCompleter(self.ask, suggestions,
+                                            enabled=lambda: bool(self.cfg.get("assistant.autocomplete", True)),
+                                            parent=self)
+                           if suggestions is not None else None)
         b_send = QPushButton("Wyślij")
         b_send.clicked.connect(self._send)
         self.b_skip = QPushButton("Bez reguł")
@@ -132,6 +135,10 @@ class HistoryOverlay(QDialog):
         if not cursor.hasSelection():
             return
         QGuiApplication.clipboard().setText(cursor.selection().toPlainText())
+
+    def hide_autocomplete(self) -> None:
+        if self._completer is not None:
+            self._completer.hide_popup()
 
     def _send(self) -> None:
         if self._completer is not None and (self._completer.popup_visible() or self._completer.completion_pending()):

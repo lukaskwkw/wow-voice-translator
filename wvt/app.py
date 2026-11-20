@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSystemTrayIcon,
     QTabWidget,
@@ -262,7 +264,9 @@ class MainWindow(QWidget):
         ask_row.addWidget(self.ask_history, 1)
         ask_row.addWidget(b_send)
         lay.addLayout(ask_row)
-        self._history_completer = BracketCompleter(self.ask_history, self.app.suggestion_items, self)
+        self._history_completer = BracketCompleter(
+            self.ask_history, self.app.suggestion_items, parent=self,
+            enabled=lambda: bool(self.app.cfg.get("assistant.autocomplete", True)))
         row = QHBoxLayout()
         b_clear = QPushButton("Wyczyść historię")
         b_clear.clicked.connect(self.on_clear_assistant_history)
@@ -295,6 +299,11 @@ class MainWindow(QWidget):
     def on_clear_assistant_history(self) -> None:
         self.app._clear_assistant_history()
         self.refresh_assistant_history(force=True)
+
+    def hide_autocomplete(self) -> None:
+        completer = getattr(self, "_history_completer", None)
+        if completer is not None:
+            completer.hide_popup()
 
     def refresh_assistant_history(self, force: bool = False) -> None:
         if not self.isVisible():
@@ -543,6 +552,9 @@ class MainWindow(QWidget):
         self.history_limit.setSuffix(" wpisów")
         self.history_limit.setValue(int(cfg.get("assistant.history_limit", 10) or 10))
         hf.addRow("Liczba wpisów:", self.history_limit)
+        self.autocomplete_cb = QCheckBox("Podpowiedzi po [ w polach Iskry (questy, NPC, miejsca)")
+        self.autocomplete_cb.setChecked(bool(cfg.get("assistant.autocomplete", True)))
+        hf.addRow(self.autocomplete_cb)
         hist_note = QLabel("Overlay można też włączyć/wyłączyć z tray. Zmiany działają po zapisaniu; "
                            "historia jest w pamięci aplikacji.")
         hist_note.setWordWrap(True)
@@ -565,7 +577,16 @@ class MainWindow(QWidget):
         save.clicked.connect(self.on_save)
         lay.addWidget(save)
         lay.addStretch(1)
-        return w
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(w)
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.addWidget(scroll)
+        return outer
 
     def _apply_cloud_preset(self) -> None:
         preset = self.cloud_preset.currentData()
@@ -670,6 +691,7 @@ class MainWindow(QWidget):
         cfg.set("assistant.llm", self.assistant_llm.currentData())
         cfg.set("assistant.history_overlay", self.history_overlay_cb.isChecked())
         cfg.set("assistant.history_limit", int(self.history_limit.value()))
+        cfg.set("assistant.autocomplete", self.autocomplete_cb.isChecked())
         base = self.openai_base.text().strip() or "https://opencode.ai/inference/openai/v1"
         model = self.openai_model.text().strip()
         if not model:
@@ -707,6 +729,7 @@ class MainWindow(QWidget):
             self.jev_openrouter_key.clear()
         cfg.save()
         self.app.apply_settings()
+        self.app.hide_autocomplete()
         self.hint_label.setText(self.app.hotkey_hint())
         QMessageBox.information(self, "Zapisano",
                                 f"Ustawienia zapisane w {cfg.path}\n\n"
@@ -901,6 +924,8 @@ class TranslatorApp:
 
                 journal = str(self.cfg.get("assistant.log_file", "logs/assistant.jsonl") or "") \
                     if self.cfg.get("privacy.log_assistant", False) else ""
+                context = str(self.cfg.get("assistant.context_log_file", "logs/context_history.jsonl") or "") \
+                    if self.cfg.get("privacy.log_llm_context", False) else ""
                 self.assistant_llm = assistant_llm(self.cfg, self.llm)  # Gemini only for her; translations stay local
                 log.info("assistant LLM: %s", self.assistant_llm.model_name)
                 from .gemini import lexicon_embedder
@@ -916,6 +941,7 @@ class TranslatorApp:
                                            instances_getter=lambda: self.instances,
                                            reminders_path=(ROOT / reminders) if reminders else None,
                                            journal_path=(ROOT / journal) if journal else None,
+                                           context_path=(ROOT / context) if context else None,
                                            remote_embedder=remote_vectors)
                 self.assistant.start()
                 self._suggest_cache_at = 0.0
@@ -1266,6 +1292,13 @@ class TranslatorApp:
             self.hover.hide()
 
     # ------------------------------------------------------------------ Iskra history overlay
+    def hide_autocomplete(self) -> None:
+        if self.history_overlay is not None:
+            self.history_overlay.hide_autocomplete()
+        window = getattr(self, "window", None)
+        if window is not None:
+            window.hide_autocomplete()
+
     def suggestion_items(self) -> list:
         """Names for the ``[`` popup from the data already loaded, cached for 10 s."""
         now = time.monotonic()
