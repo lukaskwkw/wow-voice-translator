@@ -264,10 +264,21 @@ def test_small_talk_goes_to_the_llm_in_character_and_is_spoken():
     system = llm.calls[0][0]["content"]
     assert "Iskra" in system and "po polsku" in system
     a.handle("a co robisz wieczorem?")
+    assert len(llm.calls[1]) == 1 + 2 + 1  # system, previous exchange, question; style examples stay in the system prompt
+    assert voice.said[-1][1] == "voice-iskra"
+
+
+def test_style_examples_are_not_sent_as_conversation():
+    a, ins, ui, voice, llm = make_assistant()
+    a.handle("opowiedz coś")
     from wvt.assistant import STYLE_SHOTS
 
-    assert len(llm.calls[1]) == 1 + 2 * len(STYLE_SHOTS) + 2 + 1  # system, style, previous exchange, question
-    assert voice.said[-1][1] == "voice-iskra"
+    messages = llm.calls[-1]
+    assert messages[0]["role"] == "system" and "Przykłady stylu" in messages[0]["content"]
+    assert all(q in messages[0]["content"] for q, _a in STYLE_SHOTS)
+    questions = {q for q, _a in STYLE_SHOTS}
+    assert not any(m["role"] == "user" and m["content"] in questions for m in messages)
+    assert [m["role"] for m in messages[1:]] == ["user"]  # only the real question, no fake turns
 
 
 def test_without_a_chosen_voice_she_only_shows_text():
@@ -1041,11 +1052,31 @@ def test_gear_next_suggests_upgrade_rewards_and_skips_bad_ones():
     reply, line = a.handle("gdzie iść po upgrade itemów?")
     assert line == "" and llm.calls == []
     assert "Przybliżone" in reply
-    assert "The Deadmines" in reply and "Soldier's Sword" in reply and "+8" in reply
+    assert "The Deadmines" in reply and "Soldier's Sword" in reply and "poz. 18 (wym. 10), +8" in reply
     assert "Signet for a Friend" in reply and "Signet Ring" in reply  # misc armor fits every class
     assert "Wrong Armor" not in reply and "Low Reward" not in reply
-    assert "Średnia Twojego sprzętu: 10.0 (5 części)." in reply
+    assert "Średni item level noszonych części: 10.0 (5 części)." in reply
     assert a.transcript[0]["intent"] == "gear_next"
+
+
+def test_gear_next_labels_a_small_sample_or_no_worn_gear_honestly():
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: FakeGearWorld()
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    for i, qid in enumerate((501, 502, 503, 504), start=1):
+        q = FakeGearWorld.quests[qid]
+        a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
+    a._worn_item_level = lambda: (17.0, 1)
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert ("Znam tylko 1 części noszonego sprzętu; średni item level 17.0 to mała próbka "
+            "i może być niemiarodajny.") in reply
+    assert "poz. 18 (wym. 10), +1" in reply
+    a._worn_item_level = lambda: (17.0, 0)
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "Nie widzę noszonego sprzętu; liczę od poziomu 17." in reply
 
 
 def test_gear_help_can_be_turned_off():
@@ -1098,11 +1129,11 @@ def test_gear_next_world_lists_current_zone_first_then_other_maps():
     reply, line = a._gear_next_world("gdzie na świecie po upgrade itemów")
     assert line == "" and llm.calls == []
     assert "Questy na świecie z nagrodą na upgrade" in reply
-    assert "The Deadmines" in reply and "Soldier's Sword" in reply
+    assert "The Deadmines" in reply and "Soldier's Sword" in reply and "poz. 18 (wym. 10), +8" in reply
     assert "Redridge Run" in reply and "Signet Ring" in reply and "inna mapa" in reply
     assert reply.index("The Deadmines") < reply.index("Redridge Run")  # nearest / same map first
     assert "Wrong Armor" not in reply and "Too High" not in reply and "Low Reward" not in reply
-    assert "Średnia Twojego sprzętu: 10.0 (5 części)." in reply
+    assert "Średni item level noszonych części: 10.0 (5 części)." in reply
     assert a._sources == ["gear rewards world: 2"]
 
 

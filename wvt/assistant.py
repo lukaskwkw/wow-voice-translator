@@ -885,10 +885,11 @@ class Assistant:
             return fallback
         extra = str(self.cfg.get("assistant.persona_extra", "") or "")
         system = PERSONA.format(name=self.name, extra=(" " + extra) if extra else "") + EVENT_RULES
-        shots = [{"role": role, "content": text} for q, a in EVENT_SHOTS
-                 for role, text in (("user", q), ("assistant", a))]
+        system += ("\nPrzykłady stylu (to tylko wzorce tonu, nie prawdziwe zdarzenia ani wypowiedzi gracza; "
+                   "nie traktuj ich jako historii):\n")
+        system += "\n".join(f"Sytuacja: {q}\nIskra: {a}" for q, a in EVENT_SHOTS)
         user = f"{situation} Fakty: " + " ".join(facts)
-        out = self._llm_text([{"role": "system", "content": system}, *shots, {"role": "user", "content": user}],
+        out = self._llm_text([{"role": "system", "content": system}, {"role": "user", "content": user}],
                              max_tokens=120, temperature=0.8)
         if not out:
             return fallback
@@ -1706,9 +1707,10 @@ class Assistant:
         topic = self._topic_text()
         if topic:
             system += "\n" + topic
-        shots = [{"role": role, "content": text} for q, a in STYLE_SHOTS
-                 for role, text in (("user", q), ("assistant", a))]
-        messages = [{"role": "system", "content": system}, *shots, *self._recent_history(),
+        system += ("\nPrzykłady stylu (to tylko wzorce tonu, nie prawdziwe wypowiedzi gracza; "
+                   "nie traktuj ich jako historii):\n")
+        system += "\n".join(f"Gracz: {q}\nIskra: {a}" for q, a in STYLE_SHOTS)
+        messages = [{"role": "system", "content": system}, *self._recent_history(),
                     {"role": "user", "content": polish}]
         out = self._llm_text(messages, max_tokens=160, limit=self._long_limit() if topic else None)
         return out or "Hm, zawiesiłam się na chwilę. Powtórzysz?"
@@ -1912,7 +1914,7 @@ class Assistant:
         return False
 
     def _best_gear_reward(self, world, qd: dict, player, avg: float):
-        """The highest item level reward of a quest that beats ``avg`` and fits the player, or None."""
+        """The highest item level reward (item level, name, required level) that beats ``avg`` and fits, or None."""
         best = None
         for iid in qd.get("rw", []) or []:
             rec = world.all_items.get(iid)
@@ -1927,7 +1929,7 @@ class Assistant:
             if il <= avg:
                 continue
             if best is None or il > best[0]:
-                best = (il, rec.get("n", "") or "")
+                best = (il, rec.get("n", "") or "", int(rec.get("rl", 0) or 0))
         return best
 
     def _gear_next(self, polish: str) -> tuple[str, str]:
@@ -1947,11 +1949,11 @@ class Assistant:
             area = world.zone_of_map(pos.map_id)
         zone_name = (world.names.get(area, "") if area else "") or zone
 
-        best_by_quest: dict[int, tuple[float, float, str, str, str, int, str]] = {}
+        best_by_quest: dict[int, tuple[float, float, str, str, str, int, int, str]] = {}
 
         def consider(qid: int, title: str, kind: str, dist, loc: str, reward) -> None:
-            il, name = reward
-            cand = (il - avg, dist if dist is not None else 1e9, title, kind, name, il, loc)
+            il, name, rl = reward
+            cand = (il - avg, dist if dist is not None else 1e9, title, kind, name, il, rl, loc)
             old = best_by_quest.get(qid)
             if old is None or cand[0] > old[0]:
                 best_by_quest[qid] = cand
@@ -2016,15 +2018,20 @@ class Assistant:
         found = sorted(best_by_quest.values(), key=lambda c: (-c[0], c[1]))
         parts = ["Przybliżone upgrade'y (bez slotu i statystyk nagród):"]
         if found:
-            for gain, _dist, title, kind, rname, il, loc in found[:6]:
-                bit = f"- {title} ({kind}): {rname}, poz. {il} (+{int(round(gain))})"
+            for gain, _dist, title, kind, rname, il, rl, loc in found[:6]:
+                req = f" (wym. {rl})" if rl > 0 else ""
+                bit = f"- {title} ({kind}): {rname}, poz. {il}{req}, +{int(round(gain))}"
                 if loc:
                     bit += f", {loc}"
                 parts.append(bit)
         else:
             parts.append("Nie widzę questów z nagrodami dla Twojej klasy, które byłyby lepsze od tego, co nosisz.")
         if worn_count:
-            parts.append(f"Średnia Twojego sprzętu: {avg:.1f} ({worn_count} części).")
+            if worn_count >= 4:
+                parts.append(f"Średni item level noszonych części: {avg:.1f} ({worn_count} części).")
+            else:
+                parts.append(f"Znam tylko {worn_count} części noszonego sprzętu; średni item level {avg:.1f} "
+                             f"to mała próbka i może być niemiarodajny.")
         else:
             parts.append(f"Nie widzę noszonego sprzętu; liczę od poziomu {int(avg)}.")
         self._sources = [f"gear rewards: {len(found)}"]
@@ -2061,18 +2068,19 @@ class Assistant:
             distance = spot.distance
             same_map = distance is not None
             zone = world.names.get(int(q.get("zone") or 0), "")
-            il, reward_name = reward
+            il, reward_name, rl = reward
             found.append((0 if same_map else 1, distance if same_map else 1e9, -(il - avg),
-                          q.get("n") or "", reward_name, il, zone, spot.name, "weź"))
+                          q.get("n") or "", reward_name, il, rl, zone, spot.name, "weź"))
 
         found.sort(key=lambda c: (c[0], c[1], c[2]))
         shown = found[:8]
 
         parts = ["Questy na świecie z nagrodą na upgrade (najbliżej najpierw, przybliżone):"]
         if shown:
-            for _ord, dist, neg_gain, title, reward_name, il, zone, giver, kind in shown:
+            for _ord, dist, neg_gain, title, reward_name, il, rl, zone, giver, kind in shown:
                 gain = int(round(-neg_gain))
-                base = f"- {title} ({kind}): {reward_name}, poz. {il} (+{gain})"
+                req = f" (wym. {rl})" if rl > 0 else ""
+                base = f"- {title} ({kind}): {reward_name}, poz. {il}{req}, +{gain}"
                 if dist < 1e9:
                     loc = ", ".join(x for x in (zone, f"u {giver}", f"~{int(round(dist))} yd") if x)
                 else:
@@ -2081,7 +2089,11 @@ class Assistant:
         else:
             parts.append("Nie widzę dostępnych questów na świecie z nagrodą dla Twojej klasy i poziomu.")
         if worn_count:
-            parts.append(f"Średnia Twojego sprzętu: {avg:.1f} ({worn_count} części).")
+            if worn_count >= 4:
+                parts.append(f"Średni item level noszonych części: {avg:.1f} ({worn_count} części).")
+            else:
+                parts.append(f"Znam tylko {worn_count} części noszonego sprzętu; średni item level {avg:.1f} "
+                             f"to mała próbka i może być niemiarodajny.")
         else:
             parts.append(f"Nie widzę noszonego sprzętu; liczę od poziomu {int(avg)}.")
         self._sources = [f"gear rewards world: {len(found)}"]
