@@ -49,6 +49,7 @@ from .directives import DIRECTIVES
 from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
 from .history_overlay import HistoryOverlay, render_history_html, update_history_view
+from .history_links import EntityLinker, entity_command
 from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
 from .pipeline import HistoryItem, PushToTalkPipeline
@@ -254,6 +255,9 @@ class MainWindow(QWidget):
         self.assistant_history = QTextBrowser()
         self.assistant_history.setReadOnly(True)
         self.assistant_history.setOpenExternalLinks(False)
+        self.assistant_history.setOpenLinks(False)
+        self.assistant_history.anchorClicked.connect(
+            lambda url: self.app._on_history_anchor(url.toString()))
         lay.addWidget(self.assistant_history, 1)
         ask_row = QHBoxLayout()
         self.ask_history = QLineEdit()
@@ -315,7 +319,8 @@ class MainWindow(QWidget):
         limit = int(self.app.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.app.cfg.get("assistant.name", "Iskra") or "Iskra")
         update_history_view(self.assistant_history, render_history_html(
-            items, limit, name, show_events=bool(self.app.cfg.get("assistant.history_events", True))), force)
+            items, limit, name, show_events=bool(self.app.cfg.get("assistant.history_events", True)),
+            linkify=self.app.entity_links), force)
 
     # ------------------------------------------------------------------ settings tab
     def _build_settings_tab(self) -> QWidget:
@@ -586,6 +591,9 @@ class MainWindow(QWidget):
         self.history_events_cb = QCheckBox("Pokaż automatyczne komentarze Iskry (np. po wzięciu questa)")
         self.history_events_cb.setChecked(bool(cfg.get("assistant.history_events", True)))
         hf.addRow(self.history_events_cb)
+        self.history_links_cb = QCheckBox("Kolorowe nazwy w historii (Ctrl+klik → Questie)")
+        self.history_links_cb.setChecked(bool(cfg.get("assistant.history_links", True)))
+        hf.addRow(self.history_links_cb)
         hist_note = QLabel("Overlay można też włączyć/wyłączyć z tray. Zmiany działają po zapisaniu; "
                            "historia jest w pamięci aplikacji.")
         hist_note.setWordWrap(True)
@@ -748,6 +756,7 @@ class MainWindow(QWidget):
         cfg.set("assistant.history_limit", int(self.history_limit.value()))
         cfg.set("assistant.autocomplete", self.autocomplete_cb.isChecked())
         cfg.set("assistant.history_events", self.history_events_cb.isChecked())
+        cfg.set("assistant.history_links", self.history_links_cb.isChecked())
         base = self.openai_base.text().strip() or "https://opencode.ai/inference/openai/v1"
         model = self.openai_model.text().strip()
         if not model:
@@ -873,6 +882,9 @@ class TranslatorApp:
         self.assistant = None  # wvt.assistant.Assistant, built with the models
         self.history_overlay = None  # wvt.history_overlay.HistoryOverlay, built on first use
         self.world = None  # wvt.kb.world.World (quests, NPCs, coordinates), loaded in the background
+        self.entity_links = EntityLinker(
+            lambda: self.world,
+            enabled=lambda: bool(self.cfg.get("assistant.history_links", True)))
         self.kb = None  # wvt.kb.store.KnowledgeBase (guides), loaded in the background
         self.instances: list = []  # dungeons and raids with level ranges
         from .assistant import ChatLog
@@ -1394,6 +1406,44 @@ class TranslatorApp:
                 if (item_help or kind != "item_compare")
                 and (gear_help or kind not in ("gear_next", "gear_next_world", "gear_debug"))]
 
+    def _on_history_anchor(self, href: str) -> None:
+        """Ctrl+click on a coloured name: prepare Questie's details (or a waypoint for a dungeon)."""
+        parts = (href or "").split(":")
+        if len(parts) != 3 or parts[0] != "wvt" or not parts[2].isdigit():
+            return
+        kind, ident = parts[1], int(parts[2])
+        if kind in ("quest", "item", "npc"):
+            line = entity_command(kind, ident) or ""
+        elif kind == "dungeon":
+            from .advisor import _entrance, waypoint_line
+
+            world = self.world
+            name = ""
+            dungeon = world.dungeons.get(ident) if world is not None else None
+            if isinstance(dungeon, dict):
+                name = str(dungeon.get("n") or "")
+            spot = _entrance(world, name) if name else None
+            line = waypoint_line(spot, name) if spot is not None else ""
+        else:
+            return
+        if not line:
+            return
+        if self.history_overlay is not None and self.history_overlay.isVisible():
+            self.history_overlay.hide()
+        win = self.tracker.find(max_age=0)
+        if win is None:
+            set_clipboard_text(line)
+            QMessageBox.information(self.window, "WoW", "Nie znaleziono okna WoW – tekst skopiowano do schowka.")
+            return
+        try:
+            from . import winapi
+
+            winapi.user32.SetForegroundWindow(win.hwnd)
+        except Exception:
+            pass
+        QTimer.singleShot(250, lambda: threading.Thread(
+            target=lambda: self.inserter.insert(line, self.tracker.foreground_is_wow()), daemon=True).start())
+
     def _ensure_history_overlay(self) -> HistoryOverlay:
         if self.history_overlay is None:
             self.history_overlay = HistoryOverlay(
@@ -1404,7 +1454,9 @@ class TranslatorApp:
                 on_prompt=self.show_last_prompt,
                 suggestions=self.suggestion_items,
                 directives=self.directive_items,
-                on_events=self._set_history_events)
+                on_events=self._set_history_events,
+                linkify=self.entity_links,
+                on_anchor=self._on_history_anchor)
             self.history_overlay.closed.connect(self._on_history_closed)
         return self.history_overlay
 

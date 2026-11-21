@@ -9,7 +9,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+)
 
 from .completer import BracketCompleter
 from .history_text import render_history_html
@@ -49,7 +58,8 @@ class HistoryOverlay(QDialog):
     closed = Signal()
 
     def __init__(self, items_getter, clear_callback, cfg, on_ask=None, on_skip=None, skip_pending=None,
-                 on_prompt=None, suggestions=None, directives=None, on_events=None, parent=None):
+                 on_prompt=None, suggestions=None, directives=None, on_events=None, linkify=None,
+                 on_anchor=None, parent=None):
         super().__init__(parent)
         self._items_getter = items_getter
         self._clear_callback = clear_callback
@@ -61,6 +71,8 @@ class HistoryOverlay(QDialog):
         self._suggestions = suggestions
         self._directives = directives
         self._on_events = on_events
+        self._linkify = linkify
+        self._on_anchor = on_anchor
         self.setWindowTitle("Iskra – historia rozmów")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -71,6 +83,8 @@ class HistoryOverlay(QDialog):
         self.view = QTextBrowser()
         self.view.setReadOnly(True)
         self.view.setOpenExternalLinks(False)
+        self.view.setOpenLinks(False)
+        self.view.anchorClicked.connect(self._on_anchor_clicked)
         lay.addWidget(self.view, 1)
 
         ask_row = QHBoxLayout()
@@ -116,6 +130,10 @@ class HistoryOverlay(QDialog):
         row.addWidget(b_close)
         lay.addLayout(row)
 
+        hint = QLabel("Ctrl+klik na [nazwie] wysyła zapytanie do Questie")
+        hint.setStyleSheet("color: #777777")
+        lay.addWidget(hint)
+
         self._placed = False
         self._timer = QTimer(self)
         self._timer.setInterval(700)
@@ -129,7 +147,8 @@ class HistoryOverlay(QDialog):
         limit = int(self.cfg.get("assistant.history_limit", 10) or 10)
         name = str(self.cfg.get("assistant.name", "Iskra") or "Iskra")
         show_events = bool(self.cfg.get("assistant.history_events", True))
-        update_history_view(self.view, render_history_html(items, limit, name, show_events=show_events), force)
+        update_history_view(self.view, render_history_html(items, limit, name, show_events=show_events,
+                                                           linkify=self._linkify), force)
         if self.b_skip.isChecked() and self._skip_pending is not None and not self._skip_pending():
             self.b_skip.blockSignals(True)
             self.b_skip.setChecked(False)
@@ -197,6 +216,16 @@ class HistoryOverlay(QDialog):
             return
         try:
             self._on_prompt()
+        except Exception:
+            pass
+
+    def _on_anchor_clicked(self, url) -> None:
+        if not (QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier):
+            return
+        if self._on_anchor is None:
+            return
+        try:
+            self._on_anchor(url.toString())
         except Exception:
             pass
 

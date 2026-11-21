@@ -9,6 +9,7 @@ import pytest
 from wvt import protocol as P
 from wvt.assistant import Assistant, ChatLog, READ_KINDS, clean_reply, is_invite_request, match_name, parse_intent
 from wvt.directives import DIRECTIVES, is_real_question, split
+from wvt.history_text import render_history_html
 
 
 @pytest.mark.parametrize("text,kind", [
@@ -1674,3 +1675,29 @@ def test_bez_regul_keeps_the_directive_deterministic():
     assert "Zapraszam tych" in reply and line == ""
     assert llm.calls == []
     assert a.transcript[0]["route"] == "directives"
+
+
+# --------------------------------------------------------------------------- history links
+
+def _history_items():
+    return [{"at": 0, "heard": "gdzie jest ten quest", "reply": "# Quest\n- [Wanted: Murkdeep!] **tam**"}]
+
+
+def test_render_history_html_without_linkify_is_the_old_output():
+    html = render_history_html(_history_items(), 10, "Iskra")
+    assert "<a" not in html
+    assert "white-space:pre-wrap" in html
+    assert "<b>Quest</b>" in html
+    assert "• [Wanted: Murkdeep!] <b>tam</b>" in html
+
+
+def test_render_history_html_with_linkify_keeps_layout_and_links():
+    from wvt.history_links import EntityLinker
+
+    world = SimpleNamespace(quests={4740: {"n": "Wanted: Murkdeep!"}}, all_items={}, npcs={},
+                            dungeons={}, names={})
+    html = render_history_html(_history_items(), 10, "Iskra", linkify=EntityLinker(lambda: world))
+    assert "white-space:pre-wrap" in html
+    assert '<a href="wvt:quest:4740"' in html
+    assert "<b>Quest</b>" in html
+    assert "• " in html

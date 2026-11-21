@@ -21,10 +21,13 @@ def _light_markdown(text: str) -> str:
     return text.replace(" -&gt; ", " → ").replace(" -> ", " → ")
 
 
-def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra", show_events: bool = True) -> str:
+def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra", show_events: bool = True,
+                        linkify=None) -> str:
     """The newest `limit` entries, oldest first, as simple inline HTML for QTextBrowser.
 
     `show_events=False` hides Iskra's spontaneous comments (entries with `event`).
+    `linkify(raw_reply) -> html` replaces the plain reply rendering (coloured
+    `[Name]` links); without it the old `_light_markdown` path is used.
     """
     if not items:
         return f"<p style='color:#888888'>{html.escape(EMPTY_TEXT)}</p>"
@@ -45,7 +48,8 @@ def render_history_html(items: list[dict], limit: int = 10, name: str = "Iskra",
         at = float(e.get("at") or 0)
         when = time.strftime("%H:%M:%S", time.localtime(at)) if at else "--:--:--"
         heard = html.escape(str(e.get("heard") or ""))
-        reply = _light_markdown(html.escape(str(e.get("reply") or "")))
+        reply = (linkify(str(e.get("reply") or "")) if linkify is not None
+                 else _light_markdown(html.escape(str(e.get("reply") or ""))))
         fixed = html.escape(str(e.get("fixed") or ""))
         intent = html.escape(str(e.get("intent") or ""))
         if e.get("event"):
