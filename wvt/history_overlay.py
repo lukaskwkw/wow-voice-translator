@@ -76,6 +76,7 @@ class HistoryOverlay(QDialog):
         self.setWindowTitle("Iskra – historia rozmów")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setWindowOpacity(max(0.3, min(1.0, float(cfg.get("assistant.history_opacity", 1.0) or 1.0))))
         self.resize(440, 520)
         self.setStyleSheet(_STYLE)
 

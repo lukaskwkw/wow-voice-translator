@@ -14,7 +14,7 @@ from typing import Callable, Optional
 from .assistant import fold
 from .history_text import _light_markdown
 
-__all__ = ["KIND_COLORS", "PRIORITY", "entity_command", "EntityLinker"]
+__all__ = ["KIND_COLORS", "PRIORITY", "entity_command", "dungeon_command", "EntityLinker"]
 
 KIND_COLORS = {
     "quest": "#ffd100",
@@ -52,6 +52,21 @@ def entity_command(kind: str, ident: int) -> Optional[str]:
     except (TypeError, ValueError):
         return None
     return f'/run QuestieLoader:ImportModule("QuestieSearchResults"):GetDetailFrame("{kind}",{number})'
+
+
+def dungeon_command(world, area: int) -> Optional[str]:
+    """The `/wvt way` line to a dungeon entrance, or None when the area is unknown."""
+    if world is None:
+        return None
+    from .advisor import _entrance, waypoint_line
+
+    dungeons = getattr(world, "dungeons", None)
+    dungeon = dungeons.get(area) if isinstance(dungeons, dict) else None
+    name = str(dungeon.get("n") or "") if isinstance(dungeon, dict) else ""
+    if not name:
+        return None
+    spot = _entrance(world, name)
+    return waypoint_line(spot, name) if spot is not None else None
 
 
 def _strip_word(word: str) -> str:

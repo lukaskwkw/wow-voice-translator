@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from wvt.history_links import EntityLinker, entity_command
+from wvt.history_links import EntityLinker, dungeon_command, entity_command
 
 
 def make_world():
@@ -136,6 +136,20 @@ def test_entity_command_exact_line(kind):
 @pytest.mark.parametrize("kind", ["dungeon", "place", "unknown"])
 def test_entity_command_is_none_for_non_questie_kinds(kind):
     assert entity_command(kind, 1) is None
+
+
+def test_dungeon_command_is_the_waypoint_line():
+    world = SimpleNamespace(
+        dungeons={1581: {"n": "The Deadmines", "at": [40, 30.0, 40.0]}},
+        map_of=lambda area: 1436 if area == 40 else 0,
+    )
+    assert dungeon_command(world, 1581) == "/wvt way 1436 30.0 40.0 The Deadmines"
+
+
+def test_dungeon_command_none_for_unknown_area_or_no_world():
+    world = SimpleNamespace(dungeons={1581: {"n": "The Deadmines"}}, map_of=lambda area: 0)
+    assert dungeon_command(world, 999) is None
+    assert dungeon_command(None, 1581) is None
 
 
 def test_qt_browser_reports_the_anchor_click():

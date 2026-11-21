@@ -25,6 +25,7 @@ class WowWindowTracker:
         self.extra_titles = list(extra_titles or [])  # dev simulator (python -m wvt --sim)
         self._cached: WowWindow | None = None
         self._cached_at = 0.0
+        self._last: WowWindow | None = None  # last-good handle: survives cache expiry
         self._verdicts: dict[int, bool] = {}
 
     def is_wow(self, hwnd: int) -> bool:
@@ -53,8 +54,24 @@ class WowWindowTracker:
             client = winapi.client_rect_on_screen(self._cached.hwnd)
             if client:
                 self._cached.client = client
+                self._last = self._cached
                 return self._cached
         self._cached = None
+        if self._last is not None:
+            last = self._last
+            # a recycled HWND may belong to another process: only trust the same image
+            same = winapi.process_name_of_window(last.hwnd).lower()
+            if same and last.process and same != last.process.lower():
+                self._last = None
+            elif winapi.IS_WINDOWS and winapi.user32.IsWindow(last.hwnd):
+                client = winapi.client_rect_on_screen(last.hwnd)
+                if client and client[2] > 0 and client[3] > 0:
+                    last.client = client
+                    self._cached = last
+                    self._cached_at = now
+                    return last
+            else:
+                self._last = None
         hwnd = winapi.foreground_window()
         if not self.is_wow(hwnd):
             hwnd = self._enum_find()
@@ -63,6 +80,7 @@ class WowWindowTracker:
             if client and client[2] > 0 and client[3] > 0:
                 self._cached = WowWindow(hwnd, winapi.process_name_of_window(hwnd), client)
                 self._cached_at = now
+                self._last = self._cached
         return self._cached
 
     def _enum_find(self) -> int:
@@ -70,12 +88,17 @@ class WowWindowTracker:
             return 0
         found: list[int] = []
 
+        def matches(hwnd) -> bool:
+            # cheap checks first; the process name is only looked up when they fail
+            if winapi.window_class(hwnd) in WOW_WINDOW_CLASSES:
+                return True
+            if any(winapi.window_title(hwnd).startswith(t) for t in self.extra_titles):
+                return True
+            return winapi.process_name_of_window(hwnd).lower() in self.process_names
+
         @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
         def cb(hwnd, _lparam):
-            if winapi.user32.IsWindowVisible(hwnd) and (
-                winapi.window_class(hwnd) in WOW_WINDOW_CLASSES
-                or any(winapi.window_title(hwnd).startswith(t) for t in self.extra_titles)
-            ):
+            if winapi.user32.IsWindowVisible(hwnd) and matches(hwnd):
                 found.append(hwnd)
                 return False
             return True

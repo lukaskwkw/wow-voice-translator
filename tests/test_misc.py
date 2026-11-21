@@ -62,6 +62,54 @@ def test_stop_hotkey_silences_the_voice():
     assert calls == ["silence"]
 
 
+def test_history_key_and_opacity_defaults():
+    assert DEFAULTS["assistant"]["history_key"] == "insert"
+    assert DEFAULTS["assistant"]["history_opacity"] == 1.0
+
+
+def test_history_hotkey_toggles_the_peek_without_the_pipeline():
+    pytest.importorskip("PySide6.QtWidgets")
+    from types import SimpleNamespace
+
+    from wvt.app import TranslatorApp
+
+    calls = []
+    stub = SimpleNamespace(
+        _toggle_history_peek=lambda: calls.append("peek"),
+        pipeline=SimpleNamespace(on_press=lambda channel: calls.append(f"press:{channel}")),
+        act_ptt=SimpleNamespace(isChecked=lambda: True),
+    )
+    TranslatorApp._on_hotkey(stub, "press", "history")
+    assert calls == ["peek"]
+    TranslatorApp._on_hotkey(stub, "release", "history")
+    assert calls == ["peek"]
+
+
+def test_history_peek_shows_and_hides_the_overlay():
+    pytest.importorskip("PySide6.QtWidgets")
+    from types import SimpleNamespace
+
+    from wvt.app import TranslatorApp
+
+    state = {"visible": False}
+    calls = []
+    overlay = SimpleNamespace(
+        isVisible=lambda: state["visible"],
+        hide=lambda: calls.append("hide"),
+        show=lambda: calls.append("show"),
+        raise_=lambda: calls.append("raise_"),
+    )
+    stub = SimpleNamespace(
+        history_overlay=overlay,
+        _ensure_history_overlay=lambda: overlay,
+    )
+    TranslatorApp._toggle_history_peek(stub)
+    assert calls == ["show", "raise_"]
+    state["visible"] = True
+    TranslatorApp._toggle_history_peek(stub)
+    assert calls == ["show", "raise_", "hide"]
+
+
 # ----------------------------------------------------------------- config
 def test_config_deep_merge_and_save(tmp_path):
     path = tmp_path / "config.json"

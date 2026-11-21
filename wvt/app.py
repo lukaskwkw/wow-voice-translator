@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSystemTrayIcon,
     QTabWidget,
@@ -49,7 +50,7 @@ from .directives import DIRECTIVES
 from .envfile import load_env
 from .hotkeys import Binding, HotkeyManager, KeySpec, keyspec_to_config, parse_key
 from .history_overlay import HistoryOverlay, render_history_html, update_history_view
-from .history_links import EntityLinker, entity_command
+from .history_links import EntityLinker, dungeon_command, entity_command
 from .logging_setup import setup_logging
 from .overlay import HoverOverlay, HudOverlay
 from .pipeline import HistoryItem, PushToTalkPipeline
@@ -433,6 +434,22 @@ class MainWindow(QWidget):
         stop_note = QLabel("Działa globalnie (także gdy mówi Iskra); „—” wyłącza klawisz.")
         stop_note.setWordWrap(True)
         v.addWidget(stop_note)
+        hist_key_row = QHBoxLayout()
+        hist_key_row.addWidget(QLabel("Klawisz historii Iskry:"))
+        self.history_key = QLineEdit()
+        self.history_key.setReadOnly(True)
+        self.history_key.setText(str(cfg.get("assistant.history_key", "") or "").strip() or "—")
+        b_hist_cap = QPushButton("Ustaw")
+        b_hist_cap.clicked.connect(self.on_capture_history_key)
+        b_hist_clear = QPushButton("Wyczyść")
+        b_hist_clear.clicked.connect(lambda: self.history_key.setText("—"))
+        hist_key_row.addWidget(self.history_key, 1)
+        hist_key_row.addWidget(b_hist_cap)
+        hist_key_row.addWidget(b_hist_clear)
+        v.addLayout(hist_key_row)
+        hist_key_note = QLabel("Pokazuje i chowa okno historii Iskry; „—” wyłącza klawisz.")
+        hist_key_note.setWordWrap(True)
+        v.addWidget(hist_key_note)
         self.only_wow = QCheckBox("Działaj tylko, gdy okno WoW jest aktywne (zalecane)")
         self.only_wow.setChecked(bool(cfg.get("wow.only_when_wow_active", True)))
         v.addWidget(self.only_wow)
@@ -594,6 +611,16 @@ class MainWindow(QWidget):
         self.history_links_cb = QCheckBox("Kolorowe nazwy w historii (Ctrl+klik → Questie)")
         self.history_links_cb.setChecked(bool(cfg.get("assistant.history_links", True)))
         hf.addRow(self.history_links_cb)
+        opacity_row = QHBoxLayout()
+        self.history_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.history_opacity.setRange(30, 100)
+        self.history_opacity.setValue(max(30, min(100, int(round(
+            float(cfg.get("assistant.history_opacity", 1.0) or 1.0) * 100)))))
+        self.history_opacity_label = QLabel(f"{self.history_opacity.value()}%")
+        self.history_opacity.valueChanged.connect(self._on_history_opacity)
+        opacity_row.addWidget(self.history_opacity, 1)
+        opacity_row.addWidget(self.history_opacity_label)
+        hf.addRow("Przezroczystość okna historii:", opacity_row)
         hist_note = QLabel("Overlay można też włączyć/wyłączyć z tray. Zmiany działają po zapisaniu; "
                            "historia jest w pamięci aplikacji.")
         hist_note.setWordWrap(True)
@@ -660,12 +687,21 @@ class MainWindow(QWidget):
         self.test_result.setText("Naciśnij klawisz lub przycisk myszy (4/5/środkowy)…")
         self._capture_row = row
         self._capture_stop = False
+        self._capture_history = False
         self.app.capture_key()
 
     def on_capture_stop_key(self) -> None:
         self.test_result.setText("Naciśnij klawisz lub przycisk myszy (4/5/środkowy)…")
         self._capture_row = -1
         self._capture_stop = True
+        self._capture_history = False
+        self.app.capture_key()
+
+    def on_capture_history_key(self) -> None:
+        self.test_result.setText("Naciśnij klawisz lub przycisk myszy (4/5/środkowy)…")
+        self._capture_row = -1
+        self._capture_stop = False
+        self._capture_history = True
         self.app.capture_key()
 
     def on_key_captured(self, spec: KeySpec) -> None:
@@ -674,10 +710,20 @@ class MainWindow(QWidget):
             self.stop_key.setText(keyspec_to_config(spec))
             self.test_result.setText(f"Przypisano: {spec.describe()} – pamiętaj o „Zapisz ustawienia”.")
             return
+        if getattr(self, "_capture_history", False):
+            self._capture_history = False
+            self.history_key.setText(keyspec_to_config(spec))
+            self.test_result.setText(f"Przypisano: {spec.describe()} – pamiętaj o „Zapisz ustawienia”.")
+            return
         row = getattr(self, "_capture_row", -1)
         if row >= 0:
             self.ptt_table.setItem(row, 0, QTableWidgetItem(keyspec_to_config(spec)))
             self.test_result.setText(f"Przypisano: {spec.describe()} – pamiętaj o „Zapisz ustawienia”.")
+
+    def _on_history_opacity(self, value: int) -> None:
+        self.history_opacity_label.setText(f"{value}%")
+        if self.app.history_overlay is not None:
+            self.app.history_overlay.setWindowOpacity(value / 100)
 
     def on_mic_test(self) -> None:
         self.test_btn.setEnabled(False)
@@ -732,6 +778,16 @@ class MainWindow(QWidget):
                 QMessageBox.warning(self, "Klawisz", str(exc))
                 return
         cfg.set("voice.stop_key", stop_key)
+        history_key = self.history_key.text().strip()
+        if history_key == "—":
+            history_key = ""
+        if history_key:
+            try:
+                parse_key(history_key)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Klawisz", str(exc))
+                return
+        cfg.set("assistant.history_key", history_key)
         cfg.set("audio.device", self.mic_combo.currentData())
         cfg.set("audio.silence_rms_threshold", round(self.threshold.value(), 5))
         cfg.set("audio.input_gain_db", float(self.gain_db.value()))
@@ -757,6 +813,7 @@ class MainWindow(QWidget):
         cfg.set("assistant.autocomplete", self.autocomplete_cb.isChecked())
         cfg.set("assistant.history_events", self.history_events_cb.isChecked())
         cfg.set("assistant.history_links", self.history_links_cb.isChecked())
+        cfg.set("assistant.history_opacity", self.history_opacity.value() / 100)
         base = self.openai_base.text().strip() or "https://opencode.ai/inference/openai/v1"
         model = self.openai_model.text().strip()
         if not model:
@@ -1174,6 +1231,12 @@ class TranslatorApp:
                 bindings.append(Binding(parse_key(key), "stop"))
             except ValueError as exc:
                 log.warning("bad stop binding %s: %s", key, exc)
+        key = str(self.cfg.get("assistant.history_key", "") or "").strip()
+        if key and not any(b.channel == "history" for b in bindings):
+            try:
+                bindings.append(Binding(parse_key(key), "history"))
+            except ValueError as exc:
+                log.warning("bad history binding %s: %s", key, exc)
         only_wow = bool(self.cfg.get("wow.only_when_wow_active", True))
         self.hotkeys = HotkeyManager(
             bindings,
@@ -1323,6 +1386,12 @@ class TranslatorApp:
                 parts.append(f"naciśnij {parse_key(key).describe()} → przerwij odczyt")
             except ValueError:
                 pass
+        key = str(self.cfg.get("assistant.history_key", "") or "").strip()
+        if key:
+            try:
+                parts.append(f"naciśnij {parse_key(key).describe()} → historia Iskry")
+            except ValueError:
+                pass
         return " · ".join(parts) + " · Esc w trakcie nagrywania anuluje"
 
     # ------------------------------------------------------------------ tray
@@ -1415,26 +1484,20 @@ class TranslatorApp:
         if kind in ("quest", "item", "npc"):
             line = entity_command(kind, ident) or ""
         elif kind == "dungeon":
-            from .advisor import _entrance, waypoint_line
-
-            world = self.world
-            name = ""
-            dungeon = world.dungeons.get(ident) if world is not None else None
-            if isinstance(dungeon, dict):
-                name = str(dungeon.get("n") or "")
-            spot = _entrance(world, name) if name else None
-            line = waypoint_line(spot, name) if spot is not None else ""
+            line = dungeon_command(self.world, ident) or ""
         else:
             return
         if not line:
             return
-        if self.history_overlay is not None and self.history_overlay.isVisible():
-            self.history_overlay.hide()
-        win = self.tracker.find(max_age=0)
+        win = self.tracker.find(max_age=3.0)
+        if win is None:
+            win = self.tracker.find(max_age=0)
         if win is None:
             set_clipboard_text(line)
-            QMessageBox.information(self.window, "WoW", "Nie znaleziono okna WoW – tekst skopiowano do schowka.")
+            self._on_status("error", "Iskra", ["Nie widzę okna WoW – komenda w schowku"], 5)
             return
+        if self.history_overlay is not None and self.history_overlay.isVisible():
+            self.history_overlay.hide()
         try:
             from . import winapi
 
@@ -1483,6 +1546,15 @@ class TranslatorApp:
             cb.blockSignals(True)
             cb.setChecked(on)
             cb.blockSignals(False)
+
+    def _toggle_history_peek(self) -> None:
+        """Show or hide the history overlay without changing the saved setting."""
+        if self.history_overlay is not None and self.history_overlay.isVisible():
+            self.history_overlay.hide()
+            return
+        overlay = self._ensure_history_overlay()
+        overlay.show()
+        overlay.raise_()
 
     def _set_history_events(self, on: bool) -> None:
         self.cfg.set("assistant.history_events", bool(on))
@@ -1607,6 +1679,10 @@ class TranslatorApp:
         if channel == "stop":
             if kind == "press" and self.voice is not None:
                 self.voice.silence()
+            return
+        if channel == "history":
+            if kind == "press":
+                self._toggle_history_peek()
             return
         if not self.act_ptt.isChecked():
             return
