@@ -35,7 +35,41 @@ def test_keyspec_roundtrip():
 def test_default_hotkeys_are_distinct():
     keys = [parse_key(b["key"]) for b in DEFAULTS["push_to_talk"]]
     assert len({(k.kind, k.code) for k in keys}) == len(keys)
-    assert {b["channel"] for b in DEFAULTS["push_to_talk"]} == {"say", "party", "assistant"}
+    assert {b["channel"] for b in DEFAULTS["push_to_talk"]} == {"say", "party", "assistant", "free"}
+
+
+def test_free_channel_has_no_prefix_and_defaults_to_mouse4():
+    assert DEFAULTS["channels"]["free"] == ""
+    assert DEFAULTS["push_to_talk"][-1] == {"key": "mouse4", "channel": "free"}
+    assert DEFAULTS["assistant"]["push_to_talk_free_added"] is False
+
+
+def test_free_binding_is_added_once_and_stays_removed(tmp_path):
+    pytest.importorskip("PySide6.QtWidgets")
+    from types import SimpleNamespace
+
+    from wvt.app import TranslatorApp
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"push_to_talk": [{"key": "caps_lock", "channel": "party"}],
+                                "assistant": {"push_to_talk_free_added": False}}), encoding="utf-8")
+    cfg = Config.load(path)
+
+    TranslatorApp._add_free_key(SimpleNamespace(cfg=cfg))
+
+    free = [b for b in cfg.get("push_to_talk") if b["channel"] == "free"]
+    assert free == [{"key": "mouse4", "channel": "free"}]
+    assert cfg.get("assistant.push_to_talk_free_added") is True
+    assert json.loads(path.read_text(encoding="utf-8"))["assistant"]["push_to_talk_free_added"] is True
+
+    TranslatorApp._add_free_key(SimpleNamespace(cfg=cfg))  # the flag keeps it to one row
+    assert len([b for b in cfg.get("push_to_talk") if b["channel"] == "free"]) == 1
+
+    cfg.set("push_to_talk", [b for b in cfg.get("push_to_talk") if b["channel"] != "free"])
+    cfg.save()
+    again = Config.load(path)  # the player deleted the row after the migration ran
+    TranslatorApp._add_free_key(SimpleNamespace(cfg=again))
+    assert not [b for b in again.get("push_to_talk") if b["channel"] == "free"]
 
 
 def test_stop_key_default_is_pause():

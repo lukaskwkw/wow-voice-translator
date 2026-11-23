@@ -124,6 +124,9 @@ def _phonetic(s: str) -> str:
 # Polish case endings speech recognition writes on foreign names: Arthasa, Arthasowi, Arthasem, Jainie, Jainę...
 _ENDINGS = ("owi", "ami", "em", "ie", "om", "a", "e", "u", "y", "i", "o")
 
+# Cloaks count as cloth in QuestieDB, and the item table has no slot, so only the name tells us it is one.
+_CLOAK_RE = re.compile(r"\b(cloak|cape|drape)\b", re.I)
+
 
 def match_name(spoken: str, names: list[str], cutoff: float = 0.72) -> Optional[str]:
     """The known character name that the spoken words most likely mean, or None."""
@@ -1999,8 +2002,10 @@ class Assistant:
                 return player.class_id in SHIELD_CLASSES
             if sc == 0:  # misc armor (rings, cloaks, trinkets): every class
                 return True
-            if 1 <= sc <= 4:  # cloth, leather, mail, plate
-                return sc <= best_armor(player.class_id, player.level)
+            if 1 <= sc <= 4:  # cloth, leather, mail, plate: only the class's best wearable type
+                if sc == 1 and _CLOAK_RE.search(str(rec.get("n", ""))):
+                    return True  # the item table has no slot, so a cloak is recognised by name
+                return sc == best_armor(player.class_id, player.level)
             return False
         return False
 
@@ -2025,6 +2030,30 @@ class Assistant:
                 best = (il, rec.get("n", "") or "", int(rec.get("rl", 0) or 0), c, gain)
         return best
 
+    def _chain_note(self, world, qid: int, player, thresholds, active, immediate_name: str) -> str:
+        """'; dalej w łańcuchu: <quest> → <reward>, poz. N (wym. M), +K', or '' when nothing is ahead."""
+        if not player.done_known:
+            return ""
+        ch = self._chains_for(world).chain(qid)
+        tail = [i for i in ch.ids[ch.pos + 1:] if i not in player.done and i not in active][-12:]
+        end = None
+        for i in tail:
+            q = world.quests.get(i)
+            if q and q.get("rw"):
+                end = i
+        if end is None or end == qid:
+            return ""
+        qd = world.quests.get(end)
+        reward = self._best_gear_reward(world, qd, player, thresholds)
+        if reward is None:
+            return ""
+        end_il, end_name, end_rl, _c, end_gain = reward
+        if end_name == immediate_name:
+            return ""
+        end_title = qd.get("n") or ""
+        req = f" (wym. {end_rl})" if end_rl > 0 else ""
+        return f"; dalej w łańcuchu: {end_title} → {end_name}, poz. {end_il}{req}, +{int(round(end_gain))}"
+
     def _gear_next(self, polish: str) -> tuple[str, str]:
         """Quests whose rewards look like a likely upgrade: approximate, no slot or stats guessed."""
         world = self.world_getter()
@@ -2042,11 +2071,11 @@ class Assistant:
             area = world.zone_of_map(pos.map_id)
         zone_name = (world.names.get(area, "") if area else "") or zone
 
-        best_by_quest: dict[int, tuple[float, float, str, str, str, int, int, int, str]] = {}
+        best_by_quest: dict[int, tuple[float, float, str, str, str, int, int, int, str, int]] = {}
 
         def consider(qid: int, title: str, kind: str, dist, loc: str, reward) -> None:
             il, name, rl, c, gain = reward
-            cand = (gain, dist if dist is not None else 1e9, title, kind, name, il, rl, c, loc)
+            cand = (gain, dist if dist is not None else 1e9, title, kind, name, il, rl, c, loc, qid)
             old = best_by_quest.get(qid)
             if old is None or cand[0] > old[0]:
                 best_by_quest[qid] = cand
@@ -2110,18 +2139,25 @@ class Assistant:
 
         found = sorted(best_by_quest.values(), key=lambda c: (-c[0], c[1]))
         parts = ["Przybliżone upgrade'y (bez slotu i statystyk nagród):"]
+        noted = False
         if found:
-            for gain, _dist, title, kind, rname, il, rl, _c, loc in found[:6]:
+            for gain, _dist, title, kind, rname, il, rl, _c, loc, qid in found[:6]:
                 req = f" (wym. {rl})" if rl > 0 else ""
                 bit = f"- {title} ({kind}): {rname}, poz. {il}{req}, +{int(round(gain))}"
                 if loc:
                     bit += f", {loc}"
+                note = self._chain_note(world, qid, player, thresholds, active, rname)
+                if note:
+                    bit += note
+                    noted = True
                 parts.append(bit)
         else:
             parts.append("Nie widzę questów z nagrodami dla Twojej klasy, które byłyby lepsze od tego, co nosisz.")
         missing_rl = any(c[6] <= 0 for c in found[:6])
         if missing_rl:
             parts.append("Wymaganego poziomu QuestieDB często nie zna – brak „wym.” to brak danych, nie brak wymogu.")
+        if noted:
+            parts.append("Łańcuch to orientacja: QuestieDB czasem źle łączy ogniwa, a ostatni quest może nie mieć nagrody.")
         parts.append(self._worn_note())
         self._sources = [f"gear rewards: {len(found)}"]
         return "\n".join(parts), ""
@@ -2159,14 +2195,15 @@ class Assistant:
             zone = world.names.get(int(q.get("zone") or 0), "")
             il, reward_name, rl, c, gain = reward
             found.append((0 if same_map else 1, distance if same_map else 1e9, -gain,
-                          q.get("n") or "", reward_name, il, rl, c, zone, spot.name, "weź"))
+                          q.get("n") or "", reward_name, il, rl, c, zone, spot.name, "weź", qid))
 
         found.sort(key=lambda c: (c[0], c[1], c[2]))
         shown = found[:8]
 
         parts = ["Questy na świecie z nagrodą na upgrade (najbliżej najpierw, przybliżone):"]
+        noted = False
         if shown:
-            for _ord, dist, neg_gain, title, reward_name, il, rl, _c, zone, giver, kind in shown:
+            for _ord, dist, neg_gain, title, reward_name, il, rl, _c, zone, giver, kind, qid in shown:
                 gain = int(round(-neg_gain))
                 req = f" (wym. {rl})" if rl > 0 else ""
                 base = f"- {title} ({kind}): {reward_name}, poz. {il}{req}, +{gain}"
@@ -2174,12 +2211,19 @@ class Assistant:
                     loc = ", ".join(x for x in (zone, f"u {giver}", f"~{int(round(dist))} yd") if x)
                 else:
                     loc = ", ".join(x for x in (zone, f"u {giver} (inna mapa)") if x)
-                parts.append(base + (f", {loc}" if loc else ""))
+                bit = base + (f", {loc}" if loc else "")
+                note = self._chain_note(world, qid, player, thresholds, active, reward_name)
+                if note:
+                    bit += note
+                    noted = True
+                parts.append(bit)
         else:
             parts.append("Nie widzę dostępnych questów na świecie z nagrodą dla Twojej klasy i poziomu.")
         missing_rl = any(c[6] <= 0 for c in shown)
         if missing_rl:
             parts.append("Wymaganego poziomu QuestieDB często nie zna – brak „wym.” to brak danych, nie brak wymogu.")
+        if noted:
+            parts.append("Łańcuch to orientacja: QuestieDB czasem źle łączy ogniwa, a ostatni quest może nie mieć nagrody.")
         parts.append(self._worn_note())
         self._sources = [f"gear rewards world: {len(found)}"]
         return "\n".join(parts), ""

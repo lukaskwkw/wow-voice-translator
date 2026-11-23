@@ -274,9 +274,15 @@ class PushToTalkPipeline:
 
             status = "preview"
             if insert:
-                t2 = time.perf_counter()
-                status = self.inserter.insert(chat_line, self.wow_foreground())
-                timings["insert_ms"] = round((time.perf_counter() - t2) * 1000)
+                if not cmd:
+                    # no channel prefix (the "free" channel): never go through Enter-first insertion,
+                    # which would send whatever is already typed in the chat box - copy it instead
+                    set_clipboard_text(chat_line)
+                    status = "free"
+                else:
+                    t2 = time.perf_counter()
+                    status = self.inserter.insert(chat_line, self.wow_foreground())
+                    timings["insert_ms"] = round((time.perf_counter() - t2) * 1000)
             timings["release_to_text_ms"] = round((time.perf_counter() - released_at) * 1000)
             self.last_timings = timings
             item = HistoryItem(channel, polish, english, chat_line, timings, status)
@@ -289,6 +295,7 @@ class PushToTalkPipeline:
             footer = {
                 "inserted": "W czacie – Enter wysyła, Esc anuluje",
                 "copied": "Skopiowano do schowka (WoW nie był aktywny) – wklej Ctrl+V",
+                "free": "Skopiowano – wklej w wybranym czacie (Ctrl+V)",
                 "preview": "Podgląd",
             }.get(status, status)
             self.ui.status("ok", footer, [f"PL: {polish}"] + self._heard(corr) + [
@@ -329,13 +336,19 @@ class PushToTalkPipeline:
         self._busy.acquire()
         try:
             t2 = time.perf_counter()
-            try:
-                status = self.inserter.insert(edited, self.wow_foreground())
-            except Exception as exc:
-                log.exception("insert failed")
-                self.ui.status("error", "Błąd – nic nie zostało wysłane", [str(exc)], timeout=8)
-                return None
-            item.timings["insert_ms"] = round((time.perf_counter() - t2) * 1000)
+            if not cmd and not edited.startswith("/"):
+                # the free channel: no prefix and none typed - copy, because Enter-first insertion
+                # would send whatever is already typed in the chat box
+                set_clipboard_text(edited)
+                status = "free"
+            else:
+                try:
+                    status = self.inserter.insert(edited, self.wow_foreground())
+                except Exception as exc:
+                    log.exception("insert failed")
+                    self.ui.status("error", "Błąd – nic nie zostało wysłane", [str(exc)], timeout=8)
+                    return None
+                item.timings["insert_ms"] = round((time.perf_counter() - t2) * 1000)
             item.status = status
             if self.cfg.get("privacy.keep_history", True):
                 self.history.appendleft(item)
@@ -344,7 +357,8 @@ class PushToTalkPipeline:
             else:
                 log.info("PTT %s | %d->%d chars | %s", item.channel, len(item.polish), len(body), item.timings)
             footer = {"inserted": "W czacie – Enter wysyła, Esc anuluje",
-                      "copied": "Skopiowano do schowka (WoW nie był aktywny) – wklej Ctrl+V"}.get(status, status)
+                      "copied": "Skopiowano do schowka (WoW nie był aktywny) – wklej Ctrl+V",
+                      "free": "Skopiowano – wklej w wybranym czacie (Ctrl+V)"}.get(status, status)
             self.ui.status("ok", footer, [f"PL: {item.polish}", f"EN: {item.chat_line}",
                           f"⏱ STT {item.timings.get('stt_ms', 0)} ms · tłumaczenie {item.timings.get('translate_ms', 0)} ms"],
                           timeout=float(self.cfg.get("hud.show_seconds", 6)))

@@ -1259,6 +1259,137 @@ def test_gear_next_world_is_disabled_with_gear_help_off():
     assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
 
 
+class ArmorTypeGearWorld:
+    """A warrior only counts rewards of the class's best wearable armor type (plus cloth cloaks by name)."""
+
+    names = {10: "Westfall"}
+    all_items = {
+        910: {"n": "Cloth Chest", "c": 4, "sc": 1, "il": 15, "rl": 10},  # cloth: a warrior wears mail
+        911: {"n": "Leather Tunic", "c": 4, "sc": 2, "il": 16, "rl": 10},  # leather: too light for a warrior
+        912: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 18, "rl": 10},  # mail: the warrior's best type
+        913: {"n": "Wanderer's Cloak", "c": 4, "sc": 1, "il": 20, "rl": 10},  # cloth, but a cloak: everyone wears it
+    }
+    quests = {
+        501: {"n": "Cloth Prize", "lvl": 17, "zone": 10, "rw": [910]},
+        502: {"n": "Leather Prize", "lvl": 17, "zone": 10, "rw": [911]},
+        503: {"n": "Mail Prize", "lvl": 17, "zone": 10, "rw": [912]},
+        504: {"n": "Cloak Prize", "lvl": 17, "zone": 10, "rw": [913]},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def available(self, q, qid, player, active):
+        return True
+
+    def starter_spot(self, qid, pos, faction):
+        return SimpleNamespace(name="Gryan Stoutmantle", distance=30.0)
+
+    def finisher_spot(self, qid, pos):
+        return None
+
+
+def test_gear_next_counts_only_the_best_armor_type_and_cloth_cloaks_by_name():
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: ArmorTypeGearWorld()
+    a.state = SimpleNamespace(level=17, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")  # warrior
+    a.quests.updated_at = time.time()
+    a.quests.done_known = False
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1)]
+    for i, qid in enumerate((501, 502, 503, 504), start=1):
+        q = ArmorTypeGearWorld.quests[qid]
+        a.on_packet(quest_pkt(sync=1, index=i, total=4, quest_id=qid, title=q["n"], zone="Westfall"))
+    reply, line = a.handle("gdzie iść po upgrade itemów?")
+    assert line == "" and llm.calls == []
+    assert "Mail Prize" in reply and "Mail Hauberk" in reply
+    assert "Cloak Prize" in reply and "Wanderer's Cloak" in reply
+    assert "Cloth Prize" not in reply and "Cloth Chest" not in reply
+    assert "Leather Prize" not in reply and "Leather Tunic" not in reply
+
+
+class ChainGearWorld:
+    """501 -> 502 -> 503; only 501 (a weapon) and 503 (mail) carry a usable upgrade."""
+
+    names = {10: "Westfall"}
+    all_items = {
+        910: {"n": "Soldier's Sword", "c": 2, "sc": 7, "il": 18, "rl": 10},
+        913: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 20, "rl": 12},
+    }
+    quests = {
+        501: {"n": "First Step", "lvl": 15, "zone": 10, "rw": [910], "next": 502},
+        502: {"n": "Middle Step", "lvl": 16, "zone": 10, "next": 503},
+        503: {"n": "Last Step", "lvl": 17, "zone": 10, "rw": [913]},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def available(self, q, qid, player, active):
+        return True
+
+    def starter_spot(self, qid, pos, faction):
+        return SimpleNamespace(name="Gryan Stoutmantle", distance=30.0)
+
+    def finisher_spot(self, qid, pos):
+        return None
+
+
+CHAIN_CAVEAT = "Łańcuch to orientacja: QuestieDB czasem źle łączy ogniwa, a ostatni quest może nie mieć nagrody."
+
+
+def chain_gear_assistant(world, done_known=True):
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: world
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = done_known
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1)]
+    q = world.quests[501]
+    a.on_packet(quest_pkt(sync=1, index=1, total=1, quest_id=501, title=q["n"], zone="Westfall"))
+    return a, llm
+
+
+def test_gear_next_notes_the_deepest_reward_ahead_in_the_chain():
+    a, llm = chain_gear_assistant(ChainGearWorld())
+    reply, line = a.handle("gdzie iść po upgrade itemów?")
+    assert line == "" and llm.calls == []
+    assert "dalej w łańcuchu: Last Step → Mail Hauberk, poz. 20 (wym. 12), +10" in reply
+    assert CHAIN_CAVEAT in reply
+    assert a._sources == ["gear rewards: 2"]  # the note changes neither the count nor the sources
+
+
+def test_gear_next_has_no_chain_note_without_the_completed_list():
+    a, _llm = chain_gear_assistant(ChainGearWorld(), done_known=False)
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "dalej w łańcuchu:" not in reply and CHAIN_CAVEAT not in reply
+
+
+def test_gear_next_skips_the_chain_note_for_a_weak_or_identical_reward():
+    class WeakChainWorld(ChainGearWorld):
+        all_items = {**ChainGearWorld.all_items,
+                     913: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 9, "rl": 12}}  # below the worn average
+
+    a, _llm = chain_gear_assistant(WeakChainWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "dalej w łańcuchu:" not in reply and CHAIN_CAVEAT not in reply
+
+    class SameChainWorld(ChainGearWorld):
+        quests = {**ChainGearWorld.quests,
+                  503: {"n": "Last Step", "lvl": 17, "zone": 10, "rw": [910]}}  # the same reward as 501
+
+    a, _llm = chain_gear_assistant(SameChainWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "dalej w łańcuchu:" not in reply and CHAIN_CAVEAT not in reply
+
+
 def test_worn_pieces_reads_real_loot_data_and_dedupes():
     a, *_ = make_assistant()
     a._items = {

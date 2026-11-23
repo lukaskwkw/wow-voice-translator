@@ -27,6 +27,7 @@ DEFAULTS: dict[str, Any] = {
         {"key": "caps_lock", "channel": "party"},
         {"key": "`", "channel": "say"},
         {"key": "mouse5", "channel": "assistant"},
+        {"key": "mouse4", "channel": "free"},
     ],
     # the voice assistant: her own push-to-talk key (channel "assistant"), Polish speech in, a spoken
     # answer and group/chat commands out (prepared in the chat box, Enter runs them) - wvt/assistant.py
@@ -35,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
         "name": "Iskra",
         "default_key": "mouse5",  # added once to push_to_talk for configs older than the assistant
         "default_key_added": False,
+        "push_to_talk_free_added": False,  # the prefix-free binding is added once to older configs
         # show the STT transcript for editing before Iskra processes it (Enter sends, Esc cancels);
         # separate from insert.confirm, which edits the final chat line
         "confirm_transcript": True,
@@ -106,6 +108,7 @@ DEFAULTS: dict[str, Any] = {
         "guild": "/g",
         "yell": "/y",
         "reply": "/r",
+        "free": "",  # no prefix: the text goes to the clipboard, paste it in any chat
     },
     "audio": {
         "device": None,  # None = Windows default input; otherwise device name or index

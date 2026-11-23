@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .completer import BracketCompleter
+
 STYLE = """
 QDialog {
     background: #14141c;
@@ -56,7 +58,8 @@ QPushButton:default {
 
 
 class AssistantConfirmDialog(QDialog):
-    def __init__(self, text: str, on_send, on_cancel, name: str = "Iskra", parent=None):
+    def __init__(self, text: str, on_send, on_cancel, name: str = "Iskra", parent=None,
+                 suggestions=None, directives=None, enabled=None):
         super().__init__(parent)
         self._on_send = on_send
         self._on_cancel = on_cancel
@@ -81,6 +84,9 @@ class AssistantConfirmDialog(QDialog):
         self.edit.setMaxLength(4000)
         self.edit.returnPressed.connect(self._accept)
         lay.addWidget(self.edit)
+        self._completer = (BracketCompleter(self.edit, suggestions, enabled=enabled,
+                                            brace_getter=directives, parent=self)
+                           if suggestions is not None else None)
 
         row = QHBoxLayout()
         row.addStretch(1)
@@ -97,6 +103,9 @@ class AssistantConfirmDialog(QDialog):
         self.rejected.connect(lambda: self._finish(False))
 
     def _accept(self) -> None:
+        c = getattr(self, "_completer", None)
+        if c is not None and (c.popup_visible() or c.completion_pending()):
+            return
         self.accept()
 
     def keyPressEvent(self, event):  # noqa: N802 - Esc cancels, everything else as usual

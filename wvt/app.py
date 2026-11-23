@@ -60,7 +60,7 @@ from .wow_window import WowWindow, WowWindowTracker
 
 log = logging.getLogger("wvt.app")
 
-CHANNEL_CHOICES = ["say", "party", "raid", "instance", "guild", "yell", "reply", "assistant"]
+CHANNEL_CHOICES = ["say", "party", "raid", "instance", "guild", "yell", "reply", "free", "assistant"]
 
 
 def make_icon(color: str = "#ffd100") -> QIcon:
@@ -418,6 +418,11 @@ class MainWindow(QWidget):
         row.addWidget(b_del)
         row.addStretch(1)
         v.addLayout(row)
+        free_note = QLabel("free: bez prefiksu kanału – tekst trafia do schowka, wklej go w dowolnym czacie; "
+                           "jeśli w oknie potwierdzenia wpiszesz /g, /w itd., komenda pójdzie normalnie do czatu.")
+        free_note.setWordWrap(True)
+        free_note.setStyleSheet("color: #888")
+        v.addWidget(free_note)
         stop_row = QHBoxLayout()
         stop_row.addWidget(QLabel("Klawisz przerwania odczytu:"))
         self.stop_key = QLineEdit()
@@ -994,6 +999,7 @@ class TranslatorApp:
     def start(self) -> None:
         self.tray.show()
         self._add_assistant_key()
+        self._add_free_key()
         self._start_hotkeys()
         self.reader = SignalReader(self.tracker, float(self.cfg.get("hover.poll_hz", 25)),
                                    on_start=lambda p, w: self.bridge.hover_start.emit(p, w),
@@ -1209,6 +1215,17 @@ class TranslatorApp:
         self.cfg.set("assistant.default_key_added", True)
         self.cfg.save()
 
+    def _add_free_key(self) -> None:
+        """Configs written before the prefix-free channel existed get its binding once."""
+        if self.cfg.get("assistant.push_to_talk_free_added", False):
+            return
+        bindings = list(self.cfg.get("push_to_talk", []))
+        if not any(b.get("channel") == "free" for b in bindings):
+            bindings.append({"key": "mouse4", "channel": "free"})
+            self.cfg.set("push_to_talk", bindings)
+        self.cfg.set("assistant.push_to_talk_free_added", True)
+        self.cfg.save()
+
     def _toggle_voice(self, on: bool) -> None:
         self.cfg.set("voice.enabled", on)
         if self.voice is not None:
@@ -1273,7 +1290,9 @@ class TranslatorApp:
         from .confirm_dialog import ConfirmDialog
 
         dlg = ConfirmDialog(item, self._insert_confirmed, self._cancel_confirmed,
-                            int(self.cfg.get("translation.max_chat_chars", 255)))
+                            int(self.cfg.get("translation.max_chat_chars", 255)),
+                            suggestions=self.suggestion_items, directives=self.directive_items,
+                            enabled=lambda: bool(self.cfg.get("assistant.autocomplete", True)))
         self._confirm_dialog = dlg
         dlg.show()
 
@@ -1323,7 +1342,9 @@ class TranslatorApp:
 
         dlg = AssistantConfirmDialog(text, lambda t: self._send_assistant(t, timings),
                                      self._cancel_assistant,
-                                     str(self.cfg.get("assistant.name", "Iskra") or "Iskra"))
+                                     str(self.cfg.get("assistant.name", "Iskra") or "Iskra"),
+                                     suggestions=self.suggestion_items, directives=self.directive_items,
+                                     enabled=lambda: bool(self.cfg.get("assistant.autocomplete", True)))
         self._assistant_confirm_dialog = dlg
         dlg.show()
 

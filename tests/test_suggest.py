@@ -450,3 +450,56 @@ def test_completer_brace_popup_and_tab_insert():
     win.close()
     app.processEvents()
     assert text == "{quest_list}", f"text={text!r}"
+
+
+def test_assistant_confirm_dialog_completes_brackets_and_keeps_esc_for_cancel():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    QtCore = pytest.importorskip("PySide6.QtCore")
+    QtTest = pytest.importorskip("PySide6.QtTest")
+
+    from wvt.assistant_confirm import AssistantConfirmDialog
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    sent, cancelled = [], []
+    dlg = AssistantConfirmDialog("co teraz", sent.append, lambda: cancelled.append(True),
+                                 suggestions=lambda: [Suggestion("Deadmines", "Dungeon")],
+                                 directives=lambda: [])
+    dlg.show()
+    app.processEvents()
+    dlg.edit.setFocus()
+
+    QtTest.QTest.keyClicks(dlg.edit, "[Dea")
+    app.processEvents()
+    completer = dlg._completer
+    assert completer is not None and completer.popup_visible(), "popup did not open"
+    QtTest.QTest.keyClick(dlg.edit, QtCore.Qt.Key.Key_Return)
+    app.processEvents()
+    assert dlg.edit.text() == "[Deadmines]"
+    assert sent == [] and cancelled == [], "the completing Enter must not send"
+
+    # the completion closed the popup: open it again to check that Esc only hides the list
+    dlg.edit.selectAll()
+    QtTest.QTest.keyClicks(dlg.edit, "[Dea")
+    app.processEvents()
+    assert completer.popup_visible(), "popup did not open again"
+    QtTest.QTest.keyClick(dlg.edit, QtCore.Qt.Key.Key_Escape)
+    app.processEvents()
+    assert not completer.popup_visible(), "first Esc closes only the popup"
+    assert sent == [] and cancelled == [], "first Esc must not cancel the dialog"
+
+    QtTest.QTest.keyClick(dlg.edit, QtCore.Qt.Key.Key_Return)
+    app.processEvents()
+    assert sent == ["[Dea"], "Enter with the list closed sends"
+
+    dlg2 = AssistantConfirmDialog("co teraz", sent.append, lambda: cancelled.append(True),
+                                  suggestions=lambda: [Suggestion("Deadmines", "Dungeon")],
+                                  directives=lambda: [])
+    dlg2.show()
+    app.processEvents()
+    dlg2.edit.setFocus()
+    QtTest.QTest.keyClick(dlg2.edit, QtCore.Qt.Key.Key_Escape)
+    app.processEvents()
+    assert cancelled == [True]

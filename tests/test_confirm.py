@@ -181,6 +181,71 @@ def test_on_press_is_refused_while_confirm_is_pending():
     assert p._pending_confirm is not None
 
 
+def test_free_channel_copies_the_text_instead_of_inserting(monkeypatch):
+    import types
+
+    import numpy as np
+
+    copied = []
+    monkeypatch.setattr("wvt.pipeline.set_clipboard_text", copied.append)
+
+    class Stt:
+        prompt_ok = False
+
+        def transcribe(self, clip):
+            return "Zaproś Bolka"
+
+    class Translator:
+        def translate(self, text, direction, context=None):
+            return types.SimpleNamespace(text="Invite Bolek")
+
+        def remember(self, body, polish, direction):
+            pass
+
+    cfg = Cfg({"audio": {}, "channels": {}, "translation": {"max_chat_chars": 255},
+               "privacy": {"keep_history": True}, "hud": {"show_seconds": 6}})
+    ui, inserter = FakeUI(), FakeInserter()
+    pipe = PushToTalkPipeline(cfg, None, Stt(), Translator(), inserter, ui, lambda: True)
+    audio = (np.sin(2 * np.pi * 200 * np.arange(16000) / 16000) * 0.3).astype(np.float32)
+
+    item = pipe.process_audio(audio, "free")
+
+    assert item is not None and item.channel == "free" and item.status == "free"
+    assert item.chat_line == "Invite Bolek"
+    assert copied == ["Invite Bolek"]
+    assert inserter.calls == []
+    assert ui.statuses[-1] == ("ok", "Skopiowano – wklej w wybranym czacie (Ctrl+V)")
+
+
+def test_finish_confirm_for_a_free_item_copies_plain_text(monkeypatch):
+    copied = []
+    monkeypatch.setattr("wvt.pipeline.set_clipboard_text", copied.append)
+    p = make_pipeline()
+    item = HistoryItem("free", "cześć", "hi", "hi")
+    p._pending_confirm = item
+
+    status = p.finish_confirm(item, "hello there")
+
+    assert status == "free"
+    assert copied == ["hello there"]
+    assert p.inserter.calls == []
+    assert item.chat_line == "hello there"
+    assert item.status == "free"
+    assert p.ui.statuses[-1] == ("ok", "Skopiowano – wklej w wybranym czacie (Ctrl+V)")
+
+
+def test_finish_confirm_for_a_free_item_inserts_a_typed_command():
+    p = make_pipeline()
+    item = HistoryItem("free", "cześć", "hi", "hi")
+    p._pending_confirm = item
+
+    status = p.finish_confirm(item, "/g hello")
+
+    assert status == "inserted"
+    assert p.inserter.calls == [("/g hello", True)]
+    assert item.chat_line == "/g hello"
+
+
 def test_the_confirm_branch_shows_the_prompt_and_does_not_insert():
     import types
 

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .completer import BracketCompleter
 from .pipeline import HistoryItem
 
 STYLE = """
@@ -55,7 +56,8 @@ QPushButton:default {
 
 
 class ConfirmDialog(QDialog):
-    def __init__(self, item: HistoryItem, on_insert, on_cancel, max_bytes: int = 255, parent=None):
+    def __init__(self, item: HistoryItem, on_insert, on_cancel, max_bytes: int = 255, parent=None,
+                 suggestions=None, directives=None, enabled=None):
         super().__init__(parent)
         self.item = item
         self._on_insert = on_insert
@@ -81,6 +83,9 @@ class ConfirmDialog(QDialog):
         self.edit.returnPressed.connect(self._accept)
         self.edit.textChanged.connect(self._update_counter)
         lay.addWidget(self.edit)
+        self._completer = (BracketCompleter(self.edit, suggestions, enabled=enabled,
+                                            brace_getter=directives, parent=self)
+                           if suggestions is not None else None)
 
         row = QHBoxLayout()
         self.counter = QLabel("")
@@ -105,6 +110,9 @@ class ConfirmDialog(QDialog):
         self.counter.setStyleSheet("color: #ff6b6b;" if size > self._max_bytes else "color: #8a8a9a;")
 
     def _accept(self) -> None:
+        c = getattr(self, "_completer", None)
+        if c is not None and (c.popup_visible() or c.completion_pending()):
+            return
         if not self.edit.text().strip():
             QMessageBox.information(self, "WVT", "Tekst jest pusty.")
             return
