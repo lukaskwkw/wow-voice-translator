@@ -1159,7 +1159,7 @@ local function ItemBasics(link)
 		itemID = parsed and tonumber(parsed) or 0
 	end
 	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
-	local name, _, quality, itemLevel, minLevel = SafeCall(getInfo, link)
+	local name, _, quality, itemLevel, minLevel, _, _, _, _, _, sellPrice = SafeCall(getInfo, link)
 	return {
 		itemID = itemID,
 		name = Plain(name, "string"),
@@ -1169,6 +1169,7 @@ local function ItemBasics(link)
 		equipLoc = Plain(equipLoc, "string") or "",
 		classID = Plain(classID, "number") or 0,
 		subclassID = Plain(subclassID, "number") or 0,
+		sellPrice = Plain(sellPrice, "number") or 0,
 	}
 end
 
@@ -1387,6 +1388,7 @@ local function QueueBags(full)
 			local it, b = items[id], items[id].basics
 			local line = table.concat({ id, it.count, b.quality, b.classID, b.subclassID,
 				P.EQUIP_LOC_INDEX[b.equipLoc] or 0, P.Utf8Truncate(b.name, P.MAX_LOOT_NAME_BYTES) }, "\t")
+			line = line .. "\t" .. (b.sellPrice or 0)  -- 8th field: copper a vendor pays (older apps ignore it)
 			if size + #line + 1 > BAG_TEXT_BYTES and #cur > 0 then
 				chunks[#chunks + 1] = cur
 				cur, size = {}, 0

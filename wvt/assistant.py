@@ -113,6 +113,21 @@ def name_key(name: str) -> str:
     return fold((name or "").split("-")[0])
 
 
+def _coins(copper: int) -> str:
+    """Copper as a short shop price: "1 zł 3 s", "12 s 40 c", "2 c" (zero parts left out)."""
+    copper = max(0, int(copper or 0))
+    gold, rest = divmod(copper, 10000)
+    silver, cop = divmod(rest, 100)
+    parts = []
+    if gold:
+        parts.append(f"{gold} zł")
+    if silver:
+        parts.append(f"{silver} s")
+    if cop or not parts:
+        parts.append(f"{cop} c")
+    return " ".join(parts)
+
+
 def _phonetic(s: str) -> str:
     s = fold(s)
     for a, b in (("th", "t"), ("ph", "f"), ("ck", "k"), ("w", "v"), ("y", "i"), ("ee", "i"), ("oo", "u"),
@@ -417,6 +432,8 @@ _RULES: tuple[tuple[str, str], ...] = (
                   r"|\b(lepsz\w*|now\w*)\b.*\b(sprzet|gear|item\w*|ekwipunk\w*)\b"
                   r"|\b(gdzie|jakie|co|ktore)\b.*\bquest\w*\b.*\b(nagrod\w*|sprzet|gear|item\w*|ekwipunk\w*|ulepsz\w*)\b"
                   r"|\bgdzie\b.*\bpo\b.*\b(lepsz\w*|now\w*|upgrade)\b"),
+    ("npc_loot", r"\b(co|jakie|jaki)\b.*\b(dropi\w*|wypada\w*|loot\w*|drop\w*)\b.*\b(z|od)\b"
+                 r"|\b(dropi\w*|loot\w*)\b.*\b(z|od)\b.*\b(boss\w*|mob\w*|npc)\b"),
     ("item_about", rf"^(?!.*\b(quest\w*|kwest\w*|zadani\w*|gdzie|kupi\w*|kupic)\b)"
                    rf"(?:(?=.*\b{_ITEM_NOUN}\b).*\b{_ITEM_Q}\b|(?:a\s+)?co to (?:jest )?za\b)"),
     ("stats_reset", r"\b(zresetuj\w*|wyzeruj\w*|resetuj\w*|zeruj\w*)\b.*\b(statystyk\w*|licznik\w*|sesj\w*)\b"),
@@ -1442,6 +1459,8 @@ class Assistant:
             return "Zeruję licznik. Liczymy od teraz.", ""
         if k == "loot":
             return self._loot_answer(polish), ""
+        if k == "npc_loot":
+            return self._npc_loot(polish)
         if k == "item_about":
             answer = self._item_about(polish)
             return (answer if answer is not None else (self._knowledge(polish) or self._chat(polish))), ""
@@ -3036,6 +3055,58 @@ class Assistant:
             return picked
         return "W ostatnim kwadransie nic ci nie wpadło." if mine else "Nic ostatnio nie wypadło do losowania."
 
+    _NPC_NOISE = re.compile(r"\b(co|jakie|jaki|dropi\w*|wypada\w*|loot\w*|drop\w*|z|od|boss\w*|mob\w*|npc"
+                            r"|mi|sie|prosze|ej|hej)\b")
+    _RANKS = {1: "elita", 2: "boss", 3: "przywódca", 4: "rzadki"}
+
+    def _npc_loot(self, polish: str) -> tuple[str, str]:
+        """What a named NPC or boss drops, from QuestieDB: no LLM, no drop chance (the tables have none)."""
+        world = self.world_getter()
+        if world is None:
+            return "Nie mam jeszcze bazy questów. Zbuduj ją: python -m wvt.kb.build.", ""
+        phrase = " ".join(self._NPC_NOISE.sub(" ", fold(polish)).split())
+        p = self._player()
+        hits = world.find_npcs(phrase, p.faction) if phrase else []
+        if not hits:
+            return f"Nie znam NPC o nazwie „{phrase}”.", ""
+        nid = hits[0]
+        npc = world.npcs.get(nid) or {}
+        name = npc.get("n") or phrase
+        head = []
+        rank = npc.get("r")
+        if rank in self._RANKS:
+            head.append(self._RANKS[rank])
+        lv = npc.get("lv")
+        if isinstance(lv, list) and len(lv) == 2:
+            head.append(f"poz. {lv[0]}-{lv[1]}")
+        zone = world.names.get(int(npc.get("z") or 0), "")
+        if zone:
+            head.append(zone)
+        text = f"{name}: " + ", ".join(head) if head else f"{name}:"
+        drops = []
+        for iid in world.npc_loot(nid):
+            it = world.all_items.get(iid)
+            if isinstance(it, dict) and it.get("n"):
+                drops.append(it)
+        drops.sort(key=lambda it: (-(it.get("il") or 0), fold(it.get("n"))))
+        drops = drops[:10]
+        if drops:
+            lines = []
+            for it in drops:
+                line = f"- {it['n']}, poz. {it.get('il') or 0}"
+                if (it.get("rl") or 0) > 0:
+                    line += f" (wym. {it['rl']})"
+                lines.append(line)
+            text += "\n" + "\n".join(lines)
+            if rank in self._RANKS:
+                text += "\nRanga z QuestieDB; szansa wypadu nieznana."
+        else:
+            text += f" QuestieDB nie ma tabeli łupów dla {name}."
+        if (npc.get("fl") or 0) & 4:  # NPC_FLAGS["VENDOR"]
+            text += " Sprzedaje też towary – sprawdź u niego."
+        self._sources = [f"npc loot: {len(drops)}"]
+        return text, ""
+
     _MONEY_RE = re.compile(r"(\d+)\s+(gold|silver|copper)", re.I)
     _LOOT_ITEM_RE = re.compile(r"\[([^\]]+)\](?:x(\d+))?")
 
@@ -3226,6 +3297,9 @@ class Assistant:
         if own is not None:
             quality = self._ITEM_QUALITY_LABEL.get(own.quality, f"jakość {own.quality}")
             lines.append(f"Jakość: {quality}. Masz: {own.count}.")
+            price = getattr(own.bag, "sell_price", 0) if own.bag is not None else 0
+            if (price or 0) > 0:
+                lines.append(f"U sprzedawcy: {_coins(price)}.")
         if record:
             vendors = record.get("v") or []
             if vendors:
@@ -3269,6 +3343,9 @@ class Assistant:
             o = cands[0]
             p = self._player()
             answer = item_verdict(o.loot, p.class_id, p.level) if o.loot is not None else self._item_plain(o)
+            price = getattr(o.bag, "sell_price", 0) if o.bag is not None else 0
+            if (price or 0) > 0:
+                answer += f" U sprzedawcy: {_coins(price)}."
             same = (o.class_id, o.subclass_id, o.equip_loc)  # "masz też" only for items of the same kind
             others = [c.name for c in cands[1:]
                       if c.name != o.name and (c.class_id, c.subclass_id, c.equip_loc) == same][:2]
@@ -3351,8 +3428,12 @@ class Assistant:
             return "Nie masz szarych śmieci, czysto."
         n = sum(it.count for it in junk)
         more = " I jeszcze inne." if len(junk) > 5 else ""
-        return (f"Do sprzedania masz {n} {plural(n, 'szary śmieć', 'szare śmieci', 'szarych śmieci')}: "
+        text = (f"Do sprzedania masz {n} {plural(n, 'szary śmieć', 'szare śmieci', 'szarych śmieci')}: "
                 f"{polish_list([self._count_text(i) for i in junk[:5]])}.{more}")
+        copper = sum((it.sell_price or 0) * it.count for it in junk if (it.sell_price or 0) > 0)
+        if copper > 0:
+            text += f" Razem u sprzedawcy około {_coins(copper)}."
+        return text
 
     def _bag_count(self, text: str, quiet: bool = False) -> str:
         """"Czy mam Rhapsody Malt?" / "ile mam Linen Cloth?" from the bags; "" when no item of yours is named

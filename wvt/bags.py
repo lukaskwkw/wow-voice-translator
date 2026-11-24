@@ -2,7 +2,8 @@
 
 The addon sends the whole content when it changes (at most every 3 s) and again every 5 minutes, in parts:
 the race field says ``"sync:part/parts"`` and every text line is one item,
-``itemID<TAB>count<TAB>quality<TAB>classID<TAB>subclassID<TAB>equipLoc index<TAB>name``.  A new list replaces
+``itemID<TAB>count<TAB>quality<TAB>classID<TAB>subclassID<TAB>equipLoc index<TAB>name``; a newer addon adds an
+8th field, ``<TAB>sellPrice`` (copper a vendor pays), which older lines simply do not have.  A new list replaces
 the old one only when all of its parts have arrived.
 """
 
@@ -28,10 +29,21 @@ class BagItem:
     subclass_id: int
     equip_loc: str  # "INVTYPE_2HWEAPON"..., "" = not worn
     name: str
+    sell_price: int = 0  # copper a vendor pays for one, 0 when the addon did not send it
 
     @property
     def junk(self) -> bool:
         return self.quality == 0
+
+
+def _sell_price(parts: list[str]) -> int:
+    """The 8th field (copper a vendor pays) when a newer addon sends it; 0 for a 7-field line or garbage."""
+    if len(parts) < 8:
+        return 0
+    try:
+        return max(0, int(parts[7]))
+    except ValueError:
+        return 0
 
 
 def parse_line(line: str) -> Optional[BagItem]:
@@ -42,11 +54,11 @@ def parse_line(line: str) -> Optional[BagItem]:
         iid, count, quality, cls, sub, loc = (int(x) for x in parts[:6])
     except ValueError:
         return None
-    name = "\t".join(parts[6:]).strip()
+    name = parts[6].strip()
     if not name:
         return None
     loc_name = protocol.EQUIP_LOCS[loc] if 0 <= loc < len(protocol.EQUIP_LOCS) else ""
-    return BagItem(iid, max(1, count), quality, cls, sub, loc_name, name)
+    return BagItem(iid, max(1, count), quality, cls, sub, loc_name, name, _sell_price(parts))
 
 
 class BagBook:

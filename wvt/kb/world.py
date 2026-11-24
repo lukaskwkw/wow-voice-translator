@@ -450,6 +450,13 @@ class World:
         self._object_names: dict[str, list[int]] = defaultdict(list)
         for oid, o in self.objects.items():
             self._object_names[fold(o["n"])].append(oid)
+        # loot by NPC, read off every item's drop names (the item records keep names, not ids)
+        self._loot_by_npc: dict[int, list[int]] = defaultdict(list)
+        for iid, it in self.all_items.items():
+            for name in it.get("nd") or []:
+                ids = self._npc_names.get(fold(name))
+                if ids:
+                    self._loot_by_npc[ids[0]].append(iid)
 
     @classmethod
     def load(cls, path: Path) -> "World":
@@ -598,6 +605,10 @@ class World:
         if starters == {"H"}:
             return "H"
         return ""
+
+    def npc_loot(self, npc_id: int) -> list[int]:
+        """Item ids the NPC (boss, elite...) drops, in the order the world build scanned them."""
+        return list(self._loot_by_npc.get(int(npc_id), ()))
 
     def find_npcs(self, query: str, faction: str = "") -> list[int]:
         """NPC ids by name: exact, then all words contained, then fuzzy (best first)."""

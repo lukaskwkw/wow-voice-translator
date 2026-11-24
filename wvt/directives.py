@@ -30,6 +30,7 @@ DIRECTIVES: dict[str, str] = {
     "plan_next": "następny krok planu",
     "stats": "statystyki sesji, expa i złota na godzinę",
     "loot": "co wypadło, need czy greed",
+    "npc_loot": "co dropi z danego NPC lub bossa",
     "bags": "ile miejsca w torbach",
     "gold": "ile masz złota",
     "xp": "poziom i doświadczenie",
