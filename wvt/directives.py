@@ -23,6 +23,7 @@ DIRECTIVES: dict[str, str] = {
     "quest_worth": "czy warto robić questa",
     "gear_next": "questy z nagrodami na upgrade (przybliżone)",
     "gear_next_world": "questy z nagrodami na upgrade w całym świecie (przybliżone)",
+    "gear_sources": "gdzie kupić albo zdobyć lepszy sprzęt: vendor, drop z moba, boss, obiekt",
     "gear_debug": "diagnostyka doradcy sprzętu (co widzi: noszone części, item levele nagród)",
     "where_next": "co robić dalej",
     "plan_next": "następny krok planu",

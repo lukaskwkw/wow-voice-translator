@@ -290,6 +290,31 @@ def test_quest_availability_follows_questie_rules():
     assert not w.available(w.quests[1], 1, human_mage, {1})  # already in the log
 
 
+def test_quests_without_races_inherit_the_side_of_their_starter_npcs():
+    data = {
+        "quests": {
+            "10": {"n": "Alliance Errand", "sn": [1]},
+            "11": {"n": "Horde Errand", "sn": [2]},
+            "12": {"n": "Neutral Errand", "sn": [3]},
+            "13": {"n": "Mixed Errand", "sn": [1, 2]},
+            "14": {"n": "Horde Mask", "races": 2},
+        },
+        "npcs": {"1": {"n": "Marshal", "f": "A"}, "2": {"n": "Grunt", "f": "H"},
+                 "3": {"n": "Ratchet Goblin", "f": "AH"}},
+        "zones": {},
+    }
+    w = World(data)
+    a = Player(level=20, faction="A", done_known=True)  # no race mask: the faction decides
+    h = Player(level=20, faction="H", done_known=True)
+    assert w.quest_side(w.quests[10]) == "A" and w.quest_side(w.quests[11]) == "H"
+    assert w.quest_side(w.quests[12]) == "" and w.quest_side(w.quests[13]) == ""
+    assert w.available(w.quests[10], 10, a, set()) and not w.available(w.quests[10], 10, h, set())
+    assert w.available(w.quests[11], 11, h, set()) and not w.available(w.quests[11], 11, a, set())
+    assert w.available(w.quests[12], 12, a, set()) and w.available(w.quests[12], 12, h, set())  # neutral AH
+    assert w.available(w.quests[13], 13, a, set()) and w.available(w.quests[13], 13, h, set())  # mixed
+    assert not w.available(w.quests[14], 14, a, set())  # a Horde mask still locks out the Alliance
+
+
 def test_spots_measure_yards_on_the_players_map():
     w = world()
     pos = P.PlayerPos(map_id=1436, x=0.56, y=0.47, width=3500, height=2333)

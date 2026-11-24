@@ -375,6 +375,14 @@ _QUALITY_WORDS = ((r"\bszar\w*\b", 0), (r"\bbial\w*\b", 1), (r"\bzielon\w*\b", 2
 _BACK_RE = re.compile(r"\b(go|niego|nim|jego|ten|tego|tym|temu|tamten\w*|tam|to|tamto|on|ona|ono|jej|ja|niej|nia)\b"
                       r"|^(a|i|no|ok|okej|dobra)\b")
 TOPIC_SECONDS = 900  # a topic (and the conversation) is forgotten after 15 quiet minutes
+# the same honest caveat for both the per-row chain note and the "later upgrade" section
+_CHAIN_CAVEAT = "Łańcuch to orientacja: QuestieDB czasem źle łączy ogniwa, a ostatni quest może nie mieć nagrody."
+_CHAIN_HEADER = "Łańcuchy z nagrodą na upgrade później:"
+# QuestieDB has requiredLevel = 0 for many high-end items: when the level is unknown, do not trust an item
+# far above the player's level (a heuristic cap; gear_sources only)
+_SOURCES_MAX_IL_OVER_LEVEL = 12
+# event/cosmetic clothing: no stats, and the item table has no slot
+_COSMETIC_RE = re.compile(r"\b(shirt|tabard|tuxedo|costume)\b", re.I)
 _FILLER = {"ej", "hej", "no", "prosze", "mi", "ty", "teraz", "szybko", "do", "party", "grupy", "grupa", "druzyny",
            "raidu", "rajdu", "go", "ja", "ta", "ten", "tego", "te", "pana", "pani", "gracza", "gracz", "postac",
            "postaci", "kolege", "kolezanke", "typa", "laske", "goscia", "wez", "daj", "przekaz", "oddaj", "zrob",
@@ -398,6 +406,10 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("gear_next_world",
      r"\b(cala|calym|caly|swiat\w*|swiec\w*|world)\b.*\b(upgrade|ulepsz\w*|lepsz\w*|gear|sprzet|item\w*|ekwipunk\w*)\b"
      r"|\b(upgrade|ulepsz\w*|lepsz\w*|gear|sprzet)\b.*\b(cala|calym|caly|swiat\w*|swiec\w*|world)\b"),
+    ("gear_sources", r"\b(gdzie|skad)\b.*\b(kupic|kupie|zdobyc|zdobede|drop\w*|wypada\w*)\b.*"
+                     r"\b(sprzet|gear|item\w*|ekwipunk\w*|bron\w*|pancerz\w*|miecz\w*|topor\w*|siekier\w*|sztylet\w*"
+                     r"|luk\w*|kusz\w*|kostur\w*|kij\w*|tarcz\w*|helm\w*)\b"
+                     r"|\b(kupic|kupie)\b.*\b(lepsz\w*|upgrade)\b.*\b(sprzet|gear|item\w*|ekwipunk\w*|bron\w*|pancerz\w*)\b"),
     ("gear_next", r"\bupgrade\b|\bulepsz\w*\b"
                   r"|\b(lepsz\w*|now\w*)\b.*\b(sprzet|gear|item\w*|ekwipunk\w*)\b"
                   r"|\b(gdzie|jakie|co|ktore)\b.*\bquest\w*\b.*\b(nagrod\w*|sprzet|gear|item\w*|ekwipunk\w*|ulepsz\w*)\b"
@@ -1367,6 +1379,10 @@ class Assistant:
             if self.cfg.get("assistant.gear_help", True):
                 return self._gear_next(polish)
             return "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach.", ""
+        if k == "gear_sources":
+            if self.cfg.get("assistant.gear_help", True):
+                return self._gear_sources(polish)
+            return "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach.", ""
         if k == "quest_worth":
             return self._worth(polish), ""
         if k == "stats":
@@ -2030,10 +2046,10 @@ class Assistant:
                 best = (il, rec.get("n", "") or "", int(rec.get("rl", 0) or 0), c, gain)
         return best
 
-    def _chain_note(self, world, qid: int, player, thresholds, active, immediate_name: str) -> str:
-        """'; dalej w łańcuchu: <quest> → <reward>, poz. N (wym. M), +K', or '' when nothing is ahead."""
+    def _chain_upgrade(self, world, qid: int, player, thresholds, active):
+        """(end_qid, end_title, reward) for the deepest reward-bearing quest still ahead in the chain, or None."""
         if not player.done_known:
-            return ""
+            return None
         ch = self._chains_for(world).chain(qid)
         tail = [i for i in ch.ids[ch.pos + 1:] if i not in player.done and i not in active][-12:]
         end = None
@@ -2042,17 +2058,52 @@ class Assistant:
             if q and q.get("rw"):
                 end = i
         if end is None or end == qid:
-            return ""
+            return None
         qd = world.quests.get(end)
         reward = self._best_gear_reward(world, qd, player, thresholds)
         if reward is None:
+            return None
+        return end, qd.get("n") or "", reward
+
+    def _chain_note(self, world, qid: int, player, thresholds, active, immediate_name: str) -> str:
+        """'; dalej w łańcuchu: <quest> → <reward>, poz. N (wym. M), +K', or '' when nothing is ahead."""
+        up = self._chain_upgrade(world, qid, player, thresholds, active)
+        if up is None:
             return ""
-        end_il, end_name, end_rl, _c, end_gain = reward
+        end_il, end_name, end_rl, _c, end_gain = up[2]
         if end_name == immediate_name:
             return ""
-        end_title = qd.get("n") or ""
         req = f" (wym. {end_rl})" if end_rl > 0 else ""
-        return f"; dalej w łańcuchu: {end_title} → {end_name}, poz. {end_il}{req}, +{int(round(end_gain))}"
+        return f"; dalej w łańcuchu: {up[1]} → {end_name}, poz. {end_il}{req}, +{int(round(end_gain))}"
+
+    def _chain_section(self, world, player, thresholds, active, main_ids: set[int],
+                       candidates: list[tuple[int, str, str, Optional[float]]]) -> list[str]:
+        """Rows for start quests whose chain (not themselves) carries an upgrade later: gain desc, then distance."""
+        if not player.done_known:
+            return []
+        rows: dict[tuple[int, int], tuple] = {}
+        for qid, title, loc, dist in candidates:
+            if qid in main_ids:
+                continue
+            up = self._chain_upgrade(world, qid, player, thresholds, active)
+            if up is None:
+                continue
+            end_qid, end_title, reward = up
+            il, name, rl, _c, gain = reward
+            cand = (gain, dist if dist is not None else 1e9, title, end_qid, end_title, name, il, rl, qid, loc)
+            old = rows.get((qid, end_qid))
+            if old is None or cand[0] > old[0]:
+                rows[(qid, end_qid)] = cand
+        out = sorted(rows.values(), key=lambda c: (-c[0], c[1]))
+        parts = []
+        for gain, _dist, title, end_qid, end_title, name, il, rl, qid, loc in out[:5]:
+            req = f" (wym. {rl})" if rl > 0 else ""
+            bit = (f"- {title} (weź, id {qid}): dalej {end_title} (id {end_qid}) → {name}, "
+                   f"poz. {il}{req}, +{int(round(gain))}")
+            if loc:
+                bit += f", {loc}"
+            parts.append(bit)
+        return parts
 
     def _gear_next(self, polish: str) -> tuple[str, str]:
         """Quests whose rewards look like a likely upgrade: approximate, no slot or stats guessed."""
@@ -2138,6 +2189,31 @@ class Assistant:
                 consider(qid, q.get("n") or "", "weź", dist, loc, reward)
 
         found = sorted(best_by_quest.values(), key=lambda c: (-c[0], c[1]))
+        chain_cands: list[tuple[int, str, str, Optional[float]]] = []
+        if player.done_known and area:
+            for qid, q in world.quests.items():
+                lvl = q.get("lvl") or q.get("min") or 0
+                if lvl and not (player.level - 4 <= lvl <= player.level + 2):
+                    continue
+                if int(q.get("zone") or 0) != area:
+                    continue
+                if not world.available(q, qid, player, active):
+                    continue
+                spot = world.starter_spot(qid, pos, player.faction)
+                if spot is None:
+                    continue
+                loc = ", ".join(x for x in (f"u {spot.name}", zone_name) if x)
+                chain_cands.append((qid, q.get("n") or "", loc, spot.distance))
+        if self.quests.known:
+            for q in self.quests.quests():
+                if q.complete:  # a completed quest has no "later"
+                    continue
+                spot = world.starter_spot(q.quest_id, pos, player.faction)
+                if spot is None:
+                    continue
+                loc = ", ".join(x for x in (f"u {spot.name}", zone_name) if x)
+                chain_cands.append((q.quest_id, q.title, loc, spot.distance))
+        chain_rows = self._chain_section(world, player, thresholds, active, set(best_by_quest), chain_cands)
         parts = ["Przybliżone upgrade'y (bez slotu i statystyk nagród):"]
         noted = False
         if found:
@@ -2156,8 +2232,12 @@ class Assistant:
         missing_rl = any(c[6] <= 0 for c in found[:6])
         if missing_rl:
             parts.append("Wymaganego poziomu QuestieDB często nie zna – brak „wym.” to brak danych, nie brak wymogu.")
-        if noted:
-            parts.append("Łańcuch to orientacja: QuestieDB czasem źle łączy ogniwa, a ostatni quest może nie mieć nagrody.")
+        if noted and not chain_rows:
+            parts.append(_CHAIN_CAVEAT)
+        if chain_rows:
+            parts.append(_CHAIN_HEADER)
+            parts.extend(chain_rows)
+            parts.append(_CHAIN_CAVEAT)
         parts.append(self._worn_note())
         self._sources = [f"gear rewards: {len(found)}"]
         return "\n".join(parts), ""
@@ -2178,14 +2258,12 @@ class Assistant:
         current_map = getattr(pos, "map_id", 0) if pos is not None else 0
 
         found: list[tuple] = []
+        chain_cands: list[tuple[int, str, str, Optional[float]]] = []
         for qid, q in world.quests.items():
             lvl = q.get("lvl") or q.get("min") or 0
             if lvl and not (player.level - 4 <= lvl <= player.level + 2):
                 continue
             if not world.available(q, qid, player, active):
-                continue
-            reward = self._best_gear_reward(world, q, player, thresholds)
-            if reward is None:
                 continue
             spot = world.starter_spot(qid, pos, player.faction)
             if spot is None:
@@ -2193,12 +2271,21 @@ class Assistant:
             distance = spot.distance
             same_map = distance is not None
             zone = world.names.get(int(q.get("zone") or 0), "")
+            if same_map:
+                loc = ", ".join(x for x in (zone, f"u {spot.name}", f"~{int(round(distance))} yd") if x)
+            else:
+                loc = ", ".join(x for x in (zone, f"u {spot.name} (inna mapa)") if x)
+            reward = self._best_gear_reward(world, q, player, thresholds)
+            if reward is None:  # no upgrade of its own: its chain may still carry one
+                chain_cands.append((qid, q.get("n") or "", loc, distance))
+                continue
             il, reward_name, rl, c, gain = reward
             found.append((0 if same_map else 1, distance if same_map else 1e9, -gain,
                           q.get("n") or "", reward_name, il, rl, c, zone, spot.name, "weź", qid))
 
         found.sort(key=lambda c: (c[0], c[1], c[2]))
         shown = found[:8]
+        chain_rows = self._chain_section(world, player, thresholds, active, {c[-1] for c in found}, chain_cands)
 
         parts = ["Questy na świecie z nagrodą na upgrade (najbliżej najpierw, przybliżone):"]
         noted = False
@@ -2222,10 +2309,157 @@ class Assistant:
         missing_rl = any(c[6] <= 0 for c in shown)
         if missing_rl:
             parts.append("Wymaganego poziomu QuestieDB często nie zna – brak „wym.” to brak danych, nie brak wymogu.")
-        if noted:
-            parts.append("Łańcuch to orientacja: QuestieDB czasem źle łączy ogniwa, a ostatni quest może nie mieć nagrody.")
+        if noted and not chain_rows:
+            parts.append(_CHAIN_CAVEAT)
+        if chain_rows:
+            parts.append(_CHAIN_HEADER)
+            parts.extend(chain_rows)
+            parts.append(_CHAIN_CAVEAT)
         parts.append(self._worn_note())
         self._sources = [f"gear rewards world: {len(found)}"]
+        return "\n".join(parts), ""
+
+    def _gear_sources(self, polish: str) -> tuple[str, str]:
+        """Vendor, NPC-drop and object-drop gear for this class and level: approximate, no recipes or prices."""
+        world = self.world_getter()
+        if world is None:
+            return "Nie mam jeszcze bazy questów. Zbuduj ją: python -m wvt.kb.build.", ""
+        player = self._player()
+        if not player.level:
+            return "Nie znam jeszcze twojego poziomu – daj mi chwilę po wejściu do gry.", ""
+        thresholds = self._worn_thresholds()
+        pos = self.quests.pos
+        st = self.state
+        zone = (st.zone or st.subzone) if st is not None else ""
+        area = world.find_area(zone) if zone else 0
+        if not area and pos is not None and getattr(pos, "map_id", 0):
+            area = world.zone_of_map(pos.map_id)
+
+        def scan(strict: bool) -> list[dict]:
+            out = []
+            for rec in world.all_items.values():
+                c = int(rec.get("c", 0) or 0)
+                if c not in (2, 4):
+                    continue
+                if _COSMETIC_RE.search(str(rec.get("n", ""))):
+                    continue
+                il = int(rec.get("il", 0) or 0)
+                rl = int(rec.get("rl", 0) or 0)
+                if il <= 0 or rl > player.level:
+                    continue
+                if rl <= 1 and il > player.level + _SOURCES_MAX_IL_OVER_LEVEL:
+                    continue  # no real required level in QuestieDB (0 or the placeholder 1): do not trust far-above-level items
+                if not self._gear_reward_ok(rec, player):
+                    continue
+                if not (rec.get("v") or rec.get("nd") or rec.get("od")):
+                    continue
+                if strict:
+                    if il - self._worn_threshold(c, thresholds) <= 0:
+                        continue
+                elif il < max(1, player.level - 3):
+                    continue
+                out.append(rec)
+            return out
+
+        recs = scan(True)
+        fallback = not recs
+        if fallback:
+            recs = scan(False)
+
+        rank_words = {1: "elita", 2: "boss", 3: "przywódca", 4: "rzadki"}
+
+        def npc_spot(name: str):
+            ids = world.find_npcs(name, player.faction)
+            return world.nearest("npc", ids[0], pos) if ids else None
+
+        def vendor_label(name: str) -> tuple[str, Optional[float], int]:
+            spot = npc_spot(name)
+            if spot is None:
+                return f"kup u {name} (nie znam miejsca)", None, 0
+            bits = [f"kup u {name}"]
+            z = world.area_name(spot.area)
+            if z:
+                bits.append(z)
+            if spot.distance is not None:
+                bits.append(f"~{int(round(spot.distance))} yd")
+            return ", ".join(bits), spot.distance, spot.area
+
+        def drop_label(nid: int, name: str) -> tuple[str, Optional[float], int]:
+            n = world.npcs.get(nid, {})
+            word = rank_words.get(int(n.get("r", 0) or 0), "")
+            label = f"drop z {name}" + (f" ({word})" if word else "")
+            spot = world.nearest("npc", nid, pos)
+            z = world.area_name(spot.area) if spot is not None else ""
+            z = z or world.area_name(int(n.get("z") or 0))
+            if z:
+                label += f", {z}"
+            return label, (spot.distance if spot is not None else None), (spot.area if spot is not None else 0)
+
+        def object_label(name: str) -> tuple[str, Optional[float], int]:
+            oid = world.find_object(name)
+            obj = world.objects.get(oid) if oid else None
+            if not obj:
+                return f"z obiektu {name}", None, 0
+            area_id = int(obj.get("z") or 0)
+            if not area_id:
+                sp = obj.get("sp") or {}
+                area_id = int(next(iter(sp), 0)) if sp else 0
+            z = world.area_name(area_id) if area_id else ""
+            return f"z obiektu {name}" + (f", {z}" if z else ""), None, area_id
+
+        rows: list[tuple] = []
+        for rec in recs:
+            il = int(rec.get("il", 0) or 0)
+            rl = int(rec.get("rl", 0) or 0)
+            labels: list[str] = []
+            dists: list[float] = []
+            areas: list[int] = []
+            for name in (rec.get("v") or [])[:2]:
+                label, dist, a = vendor_label(name)
+                labels.append(label)
+                if dist is not None:
+                    dists.append(dist)
+                if a:
+                    areas.append(a)
+            for name in (rec.get("nd") or [])[:2]:
+                ids = world.find_npcs(name, player.faction)
+                if not ids:
+                    labels.append(f"drop z {name}")
+                    continue
+                label, dist, a = drop_label(ids[0], name)
+                labels.append(label)
+                if dist is not None:
+                    dists.append(dist)
+                if a:
+                    areas.append(a)
+            for name in (rec.get("od") or [])[:2]:
+                label, _dist, a = object_label(name)
+                labels.append(label)
+                if a:
+                    areas.append(a)
+            labels = labels[:3]
+            if not labels:
+                continue
+            dist = min(dists) if dists else None
+            same_zone = 0 if area and area in areas else 1
+            rows.append((0 if dist is not None else 1, dist if dist is not None else 1e9, same_zone, -il,
+                         rec.get("n", "") or "", il, rl, "; ".join(labels)))
+        rows.sort(key=lambda r: r[:5])
+        shown = rows[:8]
+        if not shown:
+            self._sources = [f"gear sources: {len(rows)}"]
+            return "Nie widzę sprzętu dla Twojej klasy i poziomu u vendorów ani w dropach (QuestieDB).", ""
+        prefix = "(bez progu: poniżej Twojej średniej) " if fallback else ""
+        parts = [prefix + "Sprzęt ze źródeł poza questami (przybliżone):"]
+        for _ord, _dist, _zone, _neg_il, name, il, rl, sources in shown:
+            req = f" (wym. {rl})" if rl > 0 else ""
+            parts.append(f"- {name}, poz. {il}{req}: {sources}")
+        parts.append("Źródła: QuestieDB (vendorzy, dropy z NPC i obiektów). "
+                     "Brak danych o recepturach, reagentach i cenach rynkowych.")
+        if any(r[6] <= 1 for r in shown):
+            parts.append("Wymaganego poziomu QuestieDB często nie zna – brak „wym.” to brak danych, nie brak wymogu; "
+                         f"bez wymogu odsiewam itemy powyżej poz. {player.level + _SOURCES_MAX_IL_OVER_LEVEL}.")
+        self._sources = [f"gear sources: {len(rows)}"]
         return "\n".join(parts), ""
 
     def _gear_debug(self, polish: str) -> tuple[str, str]:

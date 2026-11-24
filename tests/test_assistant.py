@@ -929,7 +929,9 @@ def carrying_assistant():
     ("czy ten kij, który znalazłem, jest lepszy?", "item_about"),
     ("a te rękawice są dobre dla mnie?", "item_about"),
     ("czy warto zachować ten miecz?", "item_about"),
-    ("gdzie kupię lepszy miecz?", "chat"),  # shopping, not your bags
+    ("gdzie kupię lepszy miecz?", "gear_sources"),  # shopping for gear, not your bags
+    ("gdzie kupić lepszy sprzęt?", "gear_sources"),
+    ("skąd zdobyć lepszy miecz?", "gear_sources"),
     ("czy warto robić ten quest?", "quest_worth"),
     ("jakie questy dają lepszy sprzęt?", "gear_next"),
     ("gdzie iść po upgrade itemów?", "gear_next"),
@@ -1259,6 +1261,167 @@ def test_gear_next_world_is_disabled_with_gear_help_off():
     assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
 
 
+class FakeSourcesWorld:
+    """Just enough of World for vendor/drop/object gear: items, NPCs, objects, names and spots."""
+
+    names = {10: "Westfall", 20: "Redridge Mountains"}
+    npcs = {1: {"n": "Vendor One"}, 2: {"n": "Elite Mob", "r": 1}, 3: {"n": "Far Vendor"}}
+    objects = {7: {"n": "Old Chest", "z": 10}}
+    NPC_IDS = {"Vendor One": 1, "Elite Mob": 2, "Far Vendor": 3}
+    OBJ_IDS = {"Old Chest": 7}
+    all_items = {
+        900: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 18, "rl": 10, "v": ["Vendor One"]},
+        901: {"n": "Broad Axe", "c": 2, "sc": 0, "il": 17, "rl": 10, "nd": ["Elite Mob"]},
+        902: {"n": "Chest Guard", "c": 4, "sc": 3, "il": 16, "rl": 10, "od": ["Old Chest"]},
+        903: {"n": "Leather Tunic", "c": 4, "sc": 2, "il": 20, "rl": 10, "v": ["Vendor One"]},  # too light
+        904: {"n": "Wanderer's Cloak", "c": 4, "sc": 1, "il": 20, "rl": 10, "v": ["Vendor One"]},  # a cloak
+        905: {"n": "Broad Sword", "c": 2, "sc": 7, "il": 20, "rl": 10, "v": ["Vendor One"]},
+        906: {"n": "Too High Pants", "c": 4, "sc": 3, "il": 30, "rl": 40, "v": ["Vendor One"]},
+        907: {"n": "No Source", "c": 4, "sc": 3, "il": 25, "rl": 10},
+        908: {"n": "Low Mail", "c": 4, "sc": 3, "il": 8, "rl": 10, "v": ["Vendor One"]},  # below threshold
+        909: {"n": "Multi Mail", "c": 4, "sc": 3, "il": 19, "rl": 10, "v": ["Vendor One"], "nd": ["Elite Mob"]},
+        910: {"n": "Far Mail", "c": 4, "sc": 3, "il": 17, "rl": 10, "v": ["Far Vendor"]},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def find_npcs(self, query, faction=""):
+        nid = self.NPC_IDS.get(query)
+        return [nid] if nid else []
+
+    def find_object(self, name):
+        return self.OBJ_IDS.get(name, 0)
+
+    def nearest(self, kind, eid, pos):
+        spots = {1: (10, 30.0), 2: (10, 40.0), 3: (20, None)}
+        if kind != "npc" or eid not in spots:
+            return None
+        area, distance = spots[eid]
+        return SimpleNamespace(name=self.npcs[eid]["n"], area=area, distance=distance)
+
+    def area_name(self, area):
+        return self.names.get(area, "")
+
+
+def sources_assistant(world, level=15):
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: world
+    a.state = SimpleNamespace(level=level, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")  # warrior
+    a.quests.done_known = True
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1)]
+    return a, llm
+
+
+def test_gear_sources_lists_vendors_npc_drops_and_objects_without_bad_items():
+    a, llm = sources_assistant(FakeSourcesWorld())
+    reply, line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert line == "" and llm.calls == []
+    assert reply.startswith("Sprzęt ze źródeł poza questami (przybliżone):")
+    assert "Mail Hauberk, poz. 18 (wym. 10): kup u Vendor One, Westfall, ~30 yd" in reply
+    assert "Broad Axe, poz. 17 (wym. 10): drop z Elite Mob (elita), Westfall" in reply
+    assert "Chest Guard, poz. 16 (wym. 10): z obiektu Old Chest, Westfall" in reply
+    multi = next(ln for ln in reply.splitlines() if ln.startswith("- Multi Mail"))
+    assert "kup u Vendor One" in multi and "drop z Elite Mob (elita)" in multi and "; " in multi
+    assert "Leather Tunic" not in reply and "Too High Pants" not in reply
+    assert "No Source" not in reply and "Low Mail" not in reply
+    assert "Wanderer's Cloak" in reply and "Broad Sword" in reply  # a cloth cloak by name, a weapon
+    assert "Źródła: QuestieDB" in reply and "Brak danych o recepturach" in reply
+    assert "Wymaganego poziomu QuestieDB" not in reply  # every shown item knows its required level
+    assert a._sources == ["gear sources: 7"]
+
+
+def test_gear_sources_puts_the_same_map_first_and_caps_eight():
+    a, _llm = sources_assistant(FakeSourcesWorld())
+    reply, _line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert "~30 yd" in reply and reply.index("~30 yd") < reply.index("Far Mail")
+    assert reply.index("Chest Guard") < reply.index("Far Mail")  # same zone before another map
+
+    class CapSourcesWorld(FakeSourcesWorld):
+        all_items = {**FakeSourcesWorld.all_items,
+                     911: {"n": "Ghost Plate", "c": 4, "sc": 3, "il": 21, "rl": 10, "v": ["Ghost Vendor"]},
+                     912: {"n": "Top Mail", "c": 4, "sc": 3, "il": 24, "rl": 10, "v": ["Vendor One"]}}
+
+    a, _llm = sources_assistant(CapSourcesWorld())
+    reply, _line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert len([ln for ln in reply.splitlines() if ln.startswith("- ")]) == 8
+    ghost = next(ln for ln in reply.splitlines() if ln.startswith("- Ghost Plate"))
+    assert ghost.endswith("kup u Ghost Vendor (nie znam miejsca)") and "yd" not in ghost
+
+
+def test_gear_sources_falls_back_below_the_worn_average_and_says_so():
+    class FallbackSourcesWorld(FakeSourcesWorld):
+        all_items = {900: {"n": "Near Threshold Mail", "c": 4, "sc": 3, "il": 14, "rl": 10,
+                           "v": ["Vendor One"]}}
+
+    a, _llm = sources_assistant(FallbackSourcesWorld())
+    a._worn_pieces = lambda: [("Item A", 16, 4, 3)]  # strict gain would be -2
+    reply, _line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert reply.startswith("(bez progu: poniżej Twojej średniej) Sprzęt ze źródeł poza questami")
+    assert "Near Threshold Mail, poz. 14" in reply
+
+
+def test_gear_sources_caps_items_without_a_required_level():
+    class NoRequiredLevelWorld(FakeSourcesWorld):
+        all_items = {
+            900: {"n": "Mystery Mail", "c": 4, "sc": 3, "il": 20, "rl": 0, "v": ["Vendor One"]},
+            901: {"n": "Absurd Mail", "c": 4, "sc": 3, "il": 60, "rl": 0, "v": ["Vendor One"]},
+            902: {"n": "Placeholder Mail", "c": 4, "sc": 3, "il": 20, "rl": 1, "v": ["Vendor One"]},
+            903: {"n": "Placeholder Absurd Mail", "c": 4, "sc": 3, "il": 60, "rl": 1, "v": ["Vendor One"]},
+        }
+
+    a, _llm = sources_assistant(NoRequiredLevelWorld(), level=17)
+    reply, _line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert "Mystery Mail, poz. 20" in reply  # 20 <= 17 + 12
+    assert "Placeholder Mail, poz. 20" in reply  # rl = 1 is the same placeholder
+    assert "Absurd Mail" not in reply  # 60 > 17 + 12, and QuestieDB has no real required level for it
+    assert "Placeholder Absurd Mail" not in reply
+    assert "powyżej poz. 29" in reply
+
+
+def test_gear_sources_skips_cosmetic_clothing_by_name():
+    class CosmeticWorld(FakeSourcesWorld):
+        all_items = {
+            900: {"n": "White Tuxedo Shirt", "c": 4, "sc": 0, "il": 25, "rl": 10, "v": ["Vendor One"]},
+            901: {"n": "Grunt's Handwraps", "c": 4, "sc": 3, "il": 20, "rl": 10, "v": ["Vendor One"]},
+        }
+
+    a, _llm = sources_assistant(CosmeticWorld())
+    reply, _line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert "Grunt's Handwraps, poz. 20" in reply  # real mail still listed
+    assert "White Tuxedo Shirt" not in reply  # event clothing is not gear
+
+
+def test_gear_sources_is_empty_without_matching_items():
+    class NothingSourcesWorld(FakeSourcesWorld):
+        all_items = {907: {"n": "No Source", "c": 4, "sc": 3, "il": 25, "rl": 10},
+                     908: {"n": "Low Mail", "c": 4, "sc": 3, "il": 8, "rl": 10, "v": ["Vendor One"]}}
+
+    a, _llm = sources_assistant(NothingSourcesWorld())
+    reply, _line = a._gear_sources("gdzie kupić lepszy sprzęt?")
+    assert reply == "Nie widzę sprzętu dla Twojej klasy i poziomu u vendorów ani w dropach (QuestieDB)."
+    assert a._sources == ["gear sources: 0"]
+
+
+def test_gear_sources_is_asked_for_gear_not_for_a_named_item():
+    assert parse_intent("gdzie kupić lepszy sprzęt?").kind == "gear_sources"
+    assert parse_intent("skąd zdobyć lepszy miecz?").kind == "gear_sources"
+    assert parse_intent("gdzie kupię Rhapsody Malt?").kind != "gear_sources"
+    assert parse_intent("gdzie iść po upgrade itemów?").kind == "gear_next"
+
+
+def test_gear_sources_is_disabled_with_gear_help_off():
+    a, _llm = sources_assistant(FakeSourcesWorld())
+    a.cfg["assistant.gear_help"] = False
+    reply, line = a.handle("gdzie kupić lepszy sprzęt?")
+    assert line == ""
+    assert reply == "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach."
+
+
 class ArmorTypeGearWorld:
     """A warrior only counts rewards of the class's best wearable armor type (plus cloth cloaks by name)."""
 
@@ -1385,9 +1548,121 @@ def test_gear_next_skips_the_chain_note_for_a_weak_or_identical_reward():
         quests = {**ChainGearWorld.quests,
                   503: {"n": "Last Step", "lvl": 17, "zone": 10, "rw": [910]}}  # the same reward as 501
 
+        def available(self, q, qid, player, active):
+            return qid != 502  # the middle step cannot be the start of a later-upgrade section here
+
     a, _llm = chain_gear_assistant(SameChainWorld())
     reply, _line = a.handle("gdzie iść po upgrade itemów?")
     assert "dalej w łańcuchu:" not in reply and CHAIN_CAVEAT not in reply
+
+
+class ChainLaterGearWorld:
+    """501 (no reward) -> 502 (mail upgrade): the start quest is worth taking for what comes later."""
+
+    names = {10: "Westfall"}
+    all_items = {913: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 20, "rl": 12}}
+    quests = {
+        501: {"n": "First Step", "lvl": 15, "zone": 10, "next": 502},
+        502: {"n": "Last Step", "lvl": 16, "zone": 10, "rw": [913]},
+    }
+
+    def find_area(self, name):
+        return 10 if name == "Westfall" else 0
+
+    def zone_of_map(self, map_id):
+        return 10 if map_id == 10 else 0
+
+    def available(self, q, qid, player, active):
+        return True
+
+    def starter_spot(self, qid, pos, faction):
+        return SimpleNamespace(name="Gryan Stoutmantle", distance=30.0)
+
+    def finisher_spot(self, qid, pos):
+        return None
+
+
+def later_chain_assistant(world, done_known=True):
+    a, ins, ui, voice, llm = make_assistant()
+    a.world_getter = lambda: world
+    a.state = SimpleNamespace(level=15, zone="Westfall", subzone="", members=[])
+    a.quests.player = SimpleNamespace(race_id=1, class_id=1, faction_code="A")
+    a.quests.updated_at = time.time()
+    a.quests.done_known = done_known
+    a._worn_pieces = lambda: [("Item A", 10, 4, 1), ("Item B", 10, 4, 1)]
+    return a, llm
+
+
+def test_gear_next_proposes_a_start_quest_whose_upgrade_comes_later_in_the_chain():
+    a, llm = later_chain_assistant(ChainLaterGearWorld())
+    reply, line = a.handle("gdzie iść po upgrade itemów?")
+    assert line == "" and llm.calls == []
+    assert "Łańcuchy z nagrodą na upgrade później:" in reply
+    assert ("First Step (weź, id 501): dalej Last Step (id 502) → Mail Hauberk, poz. 20 (wym. 12), +10"
+            in reply)
+    assert reply.count(CHAIN_CAVEAT) == 1
+    assert a._sources == ["gear rewards: 1"]  # the section adds nothing to the main-list count
+
+
+def test_gear_next_world_proposes_a_start_quest_whose_upgrade_comes_later_in_the_chain():
+    a, llm = later_chain_assistant(ChainLaterGearWorld())
+    reply, line = a._gear_next_world("gdzie na świecie po upgrade itemów")
+    assert line == "" and llm.calls == []
+    assert "Łańcuchy z nagrodą na upgrade później:" in reply
+    assert "First Step (weź, id 501): dalej Last Step (id 502) → Mail Hauberk" in reply
+    assert reply.count(CHAIN_CAVEAT) == 1
+    assert a._sources == ["gear rewards world: 1"]
+
+
+def test_gear_chain_section_skips_a_start_quest_already_in_the_main_list():
+    class ImmediateAndLaterWorld(ChainLaterGearWorld):
+        all_items = {**ChainLaterGearWorld.all_items,
+                     910: {"n": "Soldier's Sword", "c": 2, "sc": 7, "il": 18, "rl": 10}}
+        quests = {**ChainLaterGearWorld.quests,
+                  501: {"n": "First Step", "lvl": 15, "zone": 10, "rw": [910], "next": 502}}
+
+    a, _llm = later_chain_assistant(ImmediateAndLaterWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "First Step (weź" in reply  # the main list
+    assert "id 501" not in reply and "Łańcuchy z nagrodą" not in reply
+    reply, _line = a._gear_next_world("gdzie na świecie po upgrade itemów")
+    assert "id 501" not in reply and "Łańcuchy z nagrodą" not in reply
+
+
+def test_gear_chain_section_needs_the_completed_list():
+    a, _llm = later_chain_assistant(ChainLaterGearWorld(), done_known=False)
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert "id 501" not in reply and "Łańcuchy z nagrodą" not in reply
+
+
+def test_gear_chain_section_sorts_by_gain_and_caps_five_rows():
+    class TwoChainsWorld(ChainLaterGearWorld):
+        all_items = {913: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 20, "rl": 12},
+                     914: {"n": "Small Mail", "c": 4, "sc": 3, "il": 16, "rl": 10}}
+        quests = {
+            501: {"n": "First Step", "lvl": 15, "zone": 10, "next": 502},
+            502: {"n": "Last Step", "lvl": 16, "zone": 10, "rw": [913]},
+            503: {"n": "Other Start", "lvl": 15, "zone": 10, "next": 504},
+            504: {"n": "Other End", "lvl": 16, "zone": 10, "rw": [914]},
+        }
+
+    a, _llm = later_chain_assistant(TwoChainsWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    assert reply.index("First Step (weź, id 501)") < reply.index("Other Start (weź, id 503)")  # +10 before +6
+
+    quests = {}
+    for i in range(6):
+        quests[501 + 2 * i] = {"n": f"Start {i}", "lvl": 15, "zone": 10, "next": 502 + 2 * i}
+        quests[502 + 2 * i] = {"n": f"End {i}", "lvl": 16, "zone": 10, "rw": [913]}
+
+    class ManyChainsWorld(ChainLaterGearWorld):
+        all_items = {913: {"n": "Mail Hauberk", "c": 4, "sc": 3, "il": 20, "rl": 12}}
+
+    ManyChainsWorld.quests = quests
+    a, _llm = later_chain_assistant(ManyChainsWorld())
+    reply, _line = a.handle("gdzie iść po upgrade itemów?")
+    section = reply.split("Łańcuchy z nagrodą na upgrade później:")[1].split(CHAIN_CAVEAT)[0]
+    assert len([ln for ln in section.splitlines() if ln.startswith("- ")]) == 5
 
 
 def test_worn_pieces_reads_real_loot_data_and_dedupes():

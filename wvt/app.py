@@ -1494,7 +1494,7 @@ class TranslatorApp:
         return [Suggestion(kind, "Reguła", description, kind, 0.0)
                 for kind, description in DIRECTIVES.items()
                 if (item_help or kind != "item_compare")
-                and (gear_help or kind not in ("gear_next", "gear_next_world", "gear_debug"))]
+                and (gear_help or kind not in ("gear_next", "gear_next_world", "gear_sources", "gear_debug"))]
 
     def _on_history_anchor(self, href: str) -> None:
         """Ctrl+click on a coloured name: prepare Questie's details (or a waypoint for a dungeon)."""

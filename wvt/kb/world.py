@@ -447,6 +447,9 @@ class World:
         self._all_item_names: dict[str, list[int]] = defaultdict(list)
         for iid, it in self.all_items.items():
             self._all_item_names[fold(it["n"])].append(iid)
+        self._object_names: dict[str, list[int]] = defaultdict(list)
+        for oid, o in self.objects.items():
+            self._object_names[fold(o["n"])].append(oid)
 
     @classmethod
     def load(cls, path: Path) -> "World":
@@ -549,6 +552,9 @@ class World:
             side = faction_of_mask(races)
             if side and side != p.faction:
                 return False
+        side = self.quest_side(q)
+        if side and p.faction and side != p.faction:
+            return False
         classes = q.get("classes", 0)
         if classes and classes != CLASS_KEYS["ALL_CLASSES"] and (not p.class_mask or not classes & p.class_mask):
             return False
@@ -572,6 +578,26 @@ class World:
         if bc and (bc in p.done or bc in active):
             return False
         return True
+
+    def find_object(self, name: str) -> int:
+        """Object id by its exact folded name (objects have no fuzzy index), 0 when unknown."""
+        hits = self._object_names.get(fold(name or "").strip())
+        return hits[0] if hits else 0
+
+    def quest_side(self, q: dict) -> str:
+        """'A' / 'H' when the quest is locked to one side, '' when neutral or unknown."""
+        side = faction_of_mask(q.get("races", 0))
+        if side:
+            return side
+        if q.get("races"):
+            return ""  # a mixed mask: both sides can take it
+        starters = {self.npcs[i].get("f") for i in q.get("sn", []) if i in self.npcs}
+        starters.discard(None)
+        if starters == {"A"}:
+            return "A"
+        if starters == {"H"}:
+            return "H"
+        return ""
 
     def find_npcs(self, query: str, faction: str = "") -> list[int]:
         """NPC ids by name: exact, then all words contained, then fuzzy (best first)."""
