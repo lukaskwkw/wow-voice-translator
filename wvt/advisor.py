@@ -188,12 +188,17 @@ SERVICES = (
     (r"\b(stajn\w*|stajenn\w*|stable\w*)\b", "STABLEMASTER", "stajennego"),
     (r"\b(napraw\w*|repair\w*)\b", "REPAIR", "naprawy"),
     (r"\b(duch\w* uzdrowic\w*|aniol\w*|spirit healer)\b", "SPIRIT_HEALER", "ducha uzdrowiciela"),
-    (r"\b(trener\w*|trainer\w*|nauczyciel\w*)\b", "TRAINER", "trenera"),
+    (r"\b(trener\w*|trainer\w*|nauczyciel\w*|naucz\w*|uczy\w*|szkol\w*)\b", "TRAINER", "trenera"),
 )
 CLASS_TRAINER = (("mag", "Mage"), ("wojown", "Warrior"), ("lowc", "Hunter"), ("hunter", "Hunter"), ("lotrzyk", "Rogue"),
                  ("rogue", "Rogue"), ("kaplan", "Priest"), ("priest", "Priest"), ("paladyn", "Paladin"),
                  ("szaman", "Shaman"), ("czarnoksiez", "Warlock"), ("warlock", "Warlock"), ("druid", "Druid"))
-PROF_TRAINER = (("alchem", "Alchem"), ("kowal", "Blacksmith"), ("zaklin", "Enchant"), ("enchant", "Enchant"),
+PROF_TRAINER = (("rzut", "Weapon Master"), ("rzuca", "Weapon Master"), ("throw", "Weapon Master"),
+                ("wloczni", "Weapon Master"), ("luk", "Weapon Master"), ("kusz", "Weapon Master"),
+                ("miecz", "Weapon Master"), ("topor", "Weapon Master"), ("siekier", "Weapon Master"),
+                ("obuch", "Weapon Master"), ("kij", "Weapon Master"), ("kostur", "Weapon Master"),
+                ("sztylet", "Weapon Master"), ("mlot", "Weapon Master"), ("tarcz", "Weapon Master"),
+                ("alchem", "Alchem"), ("kowal", "Blacksmith"), ("zaklin", "Enchant"), ("enchant", "Enchant"),
                 ("inzynier", "Engineer"), ("ziel", "Herbalis"), ("skorni", "Leatherwork"), ("kaletn", "Leatherwork"),
                 ("leather", "Leatherwork"), ("gornic", "Min"), ("skorow", "Skinn"), ("oprawi", "Skinn"),
                 ("krawie", "Tailor"), ("gotow", "Cook"), ("kucharz", "Cook"), ("pierwszej pomocy", "First Aid"),
@@ -207,6 +212,9 @@ TRAINER_PL = {"Mage": "magów", "Warrior": "wojowników", "Hunter": "łowców", 
               "Herbalis": "zielarstwa", "Leatherwork": "kaletnictwa", "Min": "górnictwa", "Skinn": "oprawiania skór",
               "Tailor": "krawiectwa", "Cook": "gotowania", "First Aid": "pierwszej pomocy", "Fish": "wędkarstwa",
               "Riding": "jazdy", "Weapon Master": "broni"}
+# no trainer->spell data in QuestieDB, so a weapon master answer says it honestly
+_WEAPON_MASTER_CAVEAT = (" Nie mam listy umiejętności, których uczy każdy mistrz broni - "
+                         "zapytaj go o tę, której szukasz.")
 _ENDINGS = ("owi", "ami", "em", "ie", "om", "a", "e", "u", "y", "i", "o")
 _NOISE = {"gdzie", "jest", "sa", "znajde", "znalezc", "szukac", "kupie", "najblizszy", "najblizsza", "najblizsze",
           "najblizej", "do", "mnie", "zaprowadz", "prowadz", "doprowadz", "pokaz", "na", "mapie", "zaznacz", "postaw",
@@ -328,13 +336,15 @@ def find_place(world: Optional[World], polish: str, player: Player, pos=None, en
     svc = _service(folded, player)
     if svc:
         flag, sub, pl = svc
+        caveat = _WEAPON_MASTER_CAVEAT if flag == "TRAINER" and sub == "Weapon Master" else ""
         spot = nearest_service(world, flag, sub, player, pos)
         if spot is None:
             return Advice(f"Nie znam żadnego {pl} dla twojej frakcji. Zapytaj strażnika w mieście.")
         if spot.distance is None:
-            return Advice(f"Na tej mapie nie ma {pl}. Najbliżej w mieście: {spot.name}, {spot_where(world, spot, pos)}.",
-                          waypoint_line(spot, spot.name), spot)
-        return Advice(f"Najbliżej masz {spot.name}: {spot_where(world, spot, pos)}.", waypoint_line(spot, spot.name), spot)
+            return Advice(f"Na tej mapie nie ma {pl}. Najbliżej w mieście: {spot.name}, {spot_where(world, spot, pos)}."
+                          + caveat, waypoint_line(spot, spot.name), spot)
+        return Advice(f"Najbliżej masz {spot.name}: {spot_where(world, spot, pos)}." + caveat,
+                      waypoint_line(spot, spot.name), spot)
     spot = find_npc(world, polish, player, pos, english)
     if spot is None:
         return None

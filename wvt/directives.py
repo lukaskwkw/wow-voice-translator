@@ -20,6 +20,7 @@ DIRECTIVES: dict[str, str] = {
     "quest_where": "gdzie iść z questem",
     "quest_progress": "postęp w queście",
     "quest_info": "informacje o jednym queście (LLM)",
+    "quest_difficulty": "jak trudny jest ten quest",
     "quest_worth": "czy warto robić questa",
     "gear_next": "questy z nagrodami na upgrade (przybliżone)",
     "gear_next_world": "questy z nagrodami na upgrade w całym świecie (przybliżone)",

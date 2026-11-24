@@ -403,6 +403,9 @@ _RULES: tuple[tuple[str, str], ...] = (
     ("note_list", r"\b(jakie|co|pokaz\w*|przeczytaj|wymien\w*)\b.*\b(notatk\w*|zanotowal\w*|zapisal\w*)\b"),
     ("note_done", r"\b(usun\w*|skasuj\w*|wyczysc\w*|odhacz\w*|wykresl\w*)\b.*\bnotatk\w*\b|^(zrobione|zalatwione|gotowe)\b"),
     ("note_add", r"^(?:(?:ej|hej|iskra|prosze|i)\s+)*(zanotuj|zapisz|zapamietaj|notatka|dodaj notatke)\w*\b"),
+    # "jak trudny jest ten quest?", "czy dam radę?", "na ile osób?" - before item/gear/quest_worth/quest_info
+    ("quest_difficulty", r"\b(jak|czy|na ile)\b.*\b(trudn\w*|ciezk\w*|dam rade|damy rade|ile osob|ilu osob)\b"
+                         r"|\btrudn\w*\b.*\b(quest|zadani)\w*\b"),
     ("gear_next_world",
      r"\b(cala|calym|caly|swiat\w*|swiec\w*|world)\b.*\b(upgrade|ulepsz\w*|lepsz\w*|gear|sprzet|item\w*|ekwipunk\w*)\b"
      r"|\b(upgrade|ulepsz\w*|lepsz\w*|gear|sprzet)\b.*\b(cala|calym|caly|swiat\w*|swiec\w*|world)\b"),
@@ -431,7 +434,8 @@ _RULES: tuple[tuple[str, str], ...] = (
                  r"|\bprowadz\w* (mnie )?do\b"),
     ("find", r"\b(gdzie|najblizsz\w*|najblizej|szukam|szukac|znajde)\b.*\b(trener\w*|karczm\w*|gospod\w*|bank\w*|aukcj\w*"
              r"|stajn\w*|napraw\w*|gryf\w*|wiwern\w*|hipogryf\w*|mistrz\w* lot\w*|flight\w*|duch\w* uzdrowic\w*|wejsci\w*"
-             r"|wejsc\w*)\b"),
+             r"|wejsc\w*)\b"
+             r"|\b(gdzie|skad)\b.*\b(naucz\w*|uczy\w*|szkol\w*)\b"),
     ("dungeon_level", r"\b(jaki\w*|ktory|ktore|ktora|co)\b.*\b(dung\w*|dangeon\w*|danzi\w*|loch\w*|instancj\w*|instans\w*)\b"
                       r"|\b(dung\w*|dangeon\w*|loch\w*|instancj\w*)\b.*\b(poziom\w*|level\w*|lvl|na mnie|dla mnie)\b"),
     ("where_next", r"\bgdzie\b.*\b(udac|isc dalej|dalej isc|expic|expie|levelowac|lvlowac|lewelowac|farmic|questowac"
@@ -771,6 +775,7 @@ class Assistant:
         # the same conversation for the UI (tab and overlay); memory only, newest first
         self.transcript: deque[dict] = deque(maxlen=50)
         self._topic: Optional[Topic] = None
+        self._last_list: Optional[ShownList] = None  # the rows of the last list, for "drugi" / "nr 3"
         self._plan_shown = ""  # the step of the plan she named last ("co dalej?" goes on from it)
         self._warned_no_voice = False
         self.world_getter = world_getter
@@ -1233,6 +1238,46 @@ class Assistant:
     def _back(polish: str) -> bool:
         return bool(_BACK_RE.search(fold(polish)))
 
+    def _remember_list(self, kind: str, items: list[tuple[int, str, str]]) -> None:
+        """Keep the rows she just read out, so a follow-up can point at one by ordinal or words."""
+        clean = [(i, label, hint) for i, label, hint in items if i and label][:10]
+        if clean:
+            self._last_list = ShownList(kind, clean)
+
+    # Polish ordinals as speech recognition writes them (folded): "drugi", "trzeciego", "nr 3"...
+    _ORDINALS = (("pierwsz", 1), ("drug", 2), ("trzec", 3), ("czwart", 4), ("piat", 5), ("szost", 6),
+                 ("siodm", 7), ("osm", 8), ("dziewiat", 9), ("dziesiat", 10))
+
+    def _pick_from_list(self, polish: str) -> Optional[tuple[str, int]]:
+        """(kind, id) of the row a follow-up points at in the last list, or None."""
+        shown = self._last_list
+        if shown is None or time.time() - shown.at >= TOPIC_SECONDS:
+            return None
+        items = shown.items
+        folded = fold(polish)
+        words = folded.split()
+        n = 0
+        m = re.search(r"\b(?:nr|numer)\s+(\d+)\b", folded)
+        if m:
+            n = int(m.group(1))
+        else:
+            for prefix, value in self._ORDINALS:
+                if any(w.startswith(prefix) for w in words):
+                    n = value
+                    break
+            if not n and "ostatni" in words:
+                n = len(items)
+        if n:
+            return (shown.kind, items[n - 1][0]) if 1 <= n <= len(items) else None
+        asked = [w for w in words if len(w) >= 4]
+        if asked:
+            hits = [it for it in items if all(w in fold(it[1] + " " + it[2]) for w in asked)]
+            if len(hits) == 1:
+                return shown.kind, hits[0][0]
+        if len(items) == 1 and self._back(polish):
+            return shown.kind, items[0][0]
+        return None
+
     def _topic_quest(self, quests: Optional[list] = None) -> Optional[protocol.QuestEntry]:
         """The quest you were talking about, while it is still in your log."""
         t = self._topic_now()
@@ -1383,6 +1428,11 @@ class Assistant:
             if self.cfg.get("assistant.gear_help", True):
                 return self._gear_sources(polish)
             return "Podpowiedzi questów na upgrade sprzętu są wyłączone w Ustawieniach.", ""
+        if k == "quest_difficulty":
+            text, line = self._difficulty(polish)
+            if text:
+                return text, line
+            return (self._item_about(polish) or self._knowledge(polish) or self._chat(polish)), ""
         if k == "quest_worth":
             return self._worth(polish), ""
         if k == "stats":
@@ -1769,6 +1819,11 @@ class Assistant:
         q = self._quest_by_meaning(polish, quests)  # "ten quest z narzędziami" (Google's vectors only)
         if q is not None:
             return q, True
+        picked = self._pick_from_list(polish)  # "a ten drugi?", "nr 3" - a row of the last list
+        if picked is not None and picked[0] == "quest":
+            q = next((x for x in quests if x.quest_id == picked[1]), None)
+            if q is not None:
+                return q, True
         if self._back(polish):  # "a gdzie go oddać?" - nothing described: the quest you were talking about
             q = self._topic_quest(quests)
             if q is not None:
@@ -1869,7 +1924,7 @@ class Assistant:
             return "Nie wiem, w jakiej jesteś strefie – wejdź do gry na chwilę i zapytaj jeszcze raz.", ""
         zone_name = world.names.get(area, "") or "tej strefie"
         active = {q.quest_id for q in self.quests.quests()} if self.quests.known else set()
-        found: list[tuple[float, str, int, str]] = []
+        found: list[tuple[float, str, int, str, int]] = []
         for qid, q in world.quests.items():
             lvl = q.get("lvl") or q.get("min") or 0
             if lvl and not (player.level - 4 <= lvl <= player.level + 2):
@@ -1883,18 +1938,19 @@ class Assistant:
             giver = spot.name if spot is not None else ""
             name = q.get("n") or ""
             if name:
-                found.append((distance, name, lvl, giver))
+                found.append((distance, name, lvl, giver, qid))
         if not found:
             return f"W {zone_name} nie widzę questów do wzięcia na twój poziom.", ""
         found.sort(key=lambda x: x[0])
         parts = []
-        for distance, name, lvl, giver in found[:6]:
+        for distance, name, lvl, giver, _qid in found[:6]:
             bit = f"{name} (poz. {lvl}"
             if giver:
                 bit += f", u {giver}"
             if distance < 1e9:
                 bit += f", ~{int(round(distance))} yd"
             parts.append(bit + ")")
+        self._remember_list("quest", [(qid, name, giver or zone_name) for _d, name, _lvl, giver, qid in found[:6]])
         reply = f"W {zone_name} możesz wziąć: " + "; ".join(parts) + "."
         if len(found) > 6:
             reply += f" I jeszcze {len(found) - 6}."
@@ -2077,8 +2133,12 @@ class Assistant:
         return f"; dalej w łańcuchu: {up[1]} → {end_name}, poz. {end_il}{req}, +{int(round(end_gain))}"
 
     def _chain_section(self, world, player, thresholds, active, main_ids: set[int],
-                       candidates: list[tuple[int, str, str, Optional[float]]]) -> list[str]:
-        """Rows for start quests whose chain (not themselves) carries an upgrade later: gain desc, then distance."""
+                       candidates: list[tuple[int, str, str, Optional[float]]]) -> list[tuple]:
+        """Rows for start quests whose chain (not themselves) carries an upgrade later: gain desc, then distance.
+
+        Each row is (gain, dist, title, end_qid, end_title, reward, il, rl, qid, loc); callers format it
+        with ``_chain_row_text`` so the same data can also feed the last-list memory.
+        """
         if not player.done_known:
             return []
         rows: dict[tuple[int, int], tuple] = {}
@@ -2095,15 +2155,17 @@ class Assistant:
             if old is None or cand[0] > old[0]:
                 rows[(qid, end_qid)] = cand
         out = sorted(rows.values(), key=lambda c: (-c[0], c[1]))
-        parts = []
-        for gain, _dist, title, end_qid, end_title, name, il, rl, qid, loc in out[:5]:
-            req = f" (wym. {rl})" if rl > 0 else ""
-            bit = (f"- {title} (weź, id {qid}): dalej {end_title} (id {end_qid}) → {name}, "
-                   f"poz. {il}{req}, +{int(round(gain))}")
-            if loc:
-                bit += f", {loc}"
-            parts.append(bit)
-        return parts
+        return out[:5]
+
+    @staticmethod
+    def _chain_row_text(row: tuple) -> str:
+        gain, _dist, title, end_qid, end_title, name, il, rl, qid, loc = row
+        req = f" (wym. {rl})" if rl > 0 else ""
+        bit = (f"- {title} (weź, id {qid}): dalej {end_title} (id {end_qid}) → {name}, "
+               f"poz. {il}{req}, +{int(round(gain))}")
+        if loc:
+            bit += f", {loc}"
+        return bit
 
     def _gear_next(self, polish: str) -> tuple[str, str]:
         """Quests whose rewards look like a likely upgrade: approximate, no slot or stats guessed."""
@@ -2213,7 +2275,8 @@ class Assistant:
                     continue
                 loc = ", ".join(x for x in (f"u {spot.name}", zone_name) if x)
                 chain_cands.append((q.quest_id, q.title, loc, spot.distance))
-        chain_rows = self._chain_section(world, player, thresholds, active, set(best_by_quest), chain_cands)
+        chain_data = self._chain_section(world, player, thresholds, active, set(best_by_quest), chain_cands)
+        chain_rows = [self._chain_row_text(r) for r in chain_data]
         parts = ["Przybliżone upgrade'y (bez slotu i statystyk nagród):"]
         noted = False
         if found:
@@ -2239,6 +2302,8 @@ class Assistant:
             parts.extend(chain_rows)
             parts.append(_CHAIN_CAVEAT)
         parts.append(self._worn_note())
+        self._remember_list("quest", [(qid, title, loc) for _g, _d, title, _k, _rn, _il, _rl, _c, loc, qid
+                                      in found[:6]] + [(r[8], r[2], r[9]) for r in chain_data])
         self._sources = [f"gear rewards: {len(found)}"]
         return "\n".join(parts), ""
 
@@ -2285,7 +2350,8 @@ class Assistant:
 
         found.sort(key=lambda c: (c[0], c[1], c[2]))
         shown = found[:8]
-        chain_rows = self._chain_section(world, player, thresholds, active, {c[-1] for c in found}, chain_cands)
+        chain_data = self._chain_section(world, player, thresholds, active, {c[-1] for c in found}, chain_cands)
+        chain_rows = [self._chain_row_text(r) for r in chain_data]
 
         parts = ["Questy na świecie z nagrodą na upgrade (najbliżej najpierw, przybliżone):"]
         noted = False
@@ -2316,6 +2382,14 @@ class Assistant:
             parts.extend(chain_rows)
             parts.append(_CHAIN_CAVEAT)
         parts.append(self._worn_note())
+        main_items = []
+        for _ord, dist, _neg, title, _rn, _il, _rl, _c, zone, giver, _kind, qid in shown:
+            if dist < 1e9:
+                hint = ", ".join(x for x in (zone, f"u {giver}", f"~{int(round(dist))} yd") if x)
+            else:
+                hint = ", ".join(x for x in (zone, f"u {giver} (inna mapa)") if x)
+            main_items.append((qid, title, hint))
+        self._remember_list("quest", main_items + [(r[8], r[2], r[9]) for r in chain_data])
         self._sources = [f"gear rewards world: {len(found)}"]
         return "\n".join(parts), ""
 
@@ -2596,6 +2670,7 @@ class Assistant:
             if todo:
                 shown = [self._progress(q) for q in todo[:3]]
                 parts.append("W toku: " + "; ".join(shown) + ("; i jeszcze inne." if len(todo) > 3 else "."))
+            self._remember_list("quest", [(q.quest_id, q.title, q.zone) for q in (done[:3] + todo[:3])])
             return " ".join(parts), ""
         if kind == "quest_turnin":
             if self._back(polish) or self.last_correction.found:  # "a gdzie go oddać?", "gdzie oddać X?"
@@ -2610,6 +2685,7 @@ class Assistant:
             if near:
                 out += f" Najbliżej oddasz {near[0].title}, {near[1].polish()}."
                 self._set_topic("quest", near[0].title, near[0].quest_id)
+            self._remember_list("quest", [(q.quest_id, q.title, q.zone) for q in done[:4]])
             return out, (f"/wvt track {near[0].quest_id}" if near and self._waypoints_on() else "")
         if kind == "quest_nearest":
             near = book.nearest(todo) or book.nearest(quests)
@@ -2834,6 +2910,117 @@ class Assistant:
             facts.append("Questy łańcucha po kolei: " + " → ".join(world.quests[i]["n"] for i in a.chain.ids
                                                                    if i in world.quests) + ".")
         return self._persona_line(situation, facts, f"{a.title}: {a.text()}")
+
+    _ELITE_RANK = {1: "elity", 2: "boss", 3: "przywódca", 4: "rzadki"}
+
+    def _difficulty(self, polish: str) -> tuple[str, str]:
+        """'Jak trudny jest ten quest?': level delta, group, elites, objectives, dungeon and the giver - no LLM."""
+        world = self.world_getter()
+        player = self._player()
+        if world is None or not player.level:
+            return "", ""
+        quests = self.quests.quests() if self.quests.known else []
+        entry: Optional[protocol.QuestEntry] = None
+        qid = 0
+        if quests:
+            scored = match_quests(f"{self._translate(polish, 'pl-en')} {polish}", quests)
+            if scored:
+                entry = scored[0][1]
+                qid = entry.quest_id
+        if not qid:
+            picked = self._pick_from_list(polish)  # "a ten drugi?", "nr 3" after a list
+            if picked is not None and picked[0] == "quest":
+                qid = picked[1]
+                entry = next((q for q in quests if q.quest_id == qid), None)
+        if not qid:
+            topic = self._topic_quest(quests)
+            if topic is not None:
+                entry, qid = topic, topic.quest_id
+        if not qid:
+            target, _named = self._pick_quest(polish, quests)
+            if target is not None:
+                entry, qid = target, target.quest_id
+        rec = world.quests.get(qid) if qid else None
+        if not qid or (rec is None and entry is None):
+            return "", ""
+        title = (rec or {}).get("n") or (entry.title if entry is not None else "")
+        if not title:
+            return "", ""
+        lvl = int((rec or {}).get("lvl") or (rec or {}).get("min") or 0)
+        if entry is not None and entry.level:
+            lvl = entry.level  # the quest log knows the level even when QuestieDB does not
+        delta = lvl - player.level
+        if delta <= -6:
+            verdict = "szary - tylko exp i łańcuch"
+        elif delta <= -2:
+            verdict = "łatwy"
+        elif delta <= 1:
+            verdict = "w sam raz"
+        elif delta <= 3:
+            verdict = "trudniejszy niż Twój poziom"
+        else:
+            verdict = "na później"
+        extras: list[str] = []
+        group = entry.group if entry is not None else 0
+        if group > 1:
+            extras.append(f"na grupę {group}")
+        ranks: list[str] = []
+        has_kill = False
+        if entry is None:  # not in the journal: infer elites from the kill objectives (never guess)
+            for pair in (rec or {}).get("kill") or []:
+                has_kill = True
+                nid = pair[0] if isinstance(pair, (list, tuple)) else pair
+                r = int((world.npcs.get(int(nid)) or {}).get("r") or 0)
+                word = self._ELITE_RANK.get(r)
+                if word and word not in ranks:
+                    ranks.append(word)
+            if ranks:
+                extras.append(", ".join(ranks))
+        if entry is not None and entry.objectives:
+            extras.append(f"cele: {len(entry.objectives)}")
+        dungeon = self._dungeon_of(world, rec, qid)
+        if dungeon:
+            extras.append(f"prowadzi do {dungeon}")
+        first = f"{title} (poz. {lvl}, Ty {player.level}): {verdict}"
+        if extras:
+            first += ", " + "; ".join(extras)
+        lines = [first]
+        pos = self.quests.pos
+        giver = world.starter_spot(qid, pos, player.faction) if qid else None
+        turn = world.finisher_spot(qid, pos) if qid else None
+        where_bits = []
+        if giver is not None:
+            where_bits.append(f"Dawca: {giver.name}, {spot_where(world, giver, pos)}")
+        if turn is not None:
+            where_bits.append(f"oddajesz u {turn.name}, {spot_where(world, turn, pos)}")
+        if where_bits:
+            lines.append("; ".join(where_bits) + ".")
+        if entry is None and not has_kill:  # never guess the group size
+            lines[-1] += " Grupy nie znam, dopóki nie weźmiesz."
+        self._set_topic("quest", title, qid)
+        self._sources = ["quest difficulty"]
+        return "\n".join(lines), ""
+
+    def _dungeon_of(self, world, rec: Optional[dict], qid: int) -> str:
+        """The dungeon name the quest's zone or chain leads into, or '' (QuestieDB zone names only)."""
+        names = {fold(d["n"]): d["n"] for d in world.dungeons.values() if d.get("n")}
+        if not names:
+            return ""
+        if rec is not None:
+            zone = world.names.get(int(rec.get("zone") or 0), "")
+            if fold(zone) in names:
+                return names[fold(zone)]
+        if not qid:
+            return ""
+        try:
+            ids = self._chains_for(world).chain(qid).ids
+        except Exception:
+            return ""
+        for cid in ids:
+            zone = world.names.get(int((world.quests.get(cid) or {}).get("zone") or 0), "")
+            if fold(zone) in names:
+                return names[fold(zone)]
+        return ""
 
     _MINE_RE = re.compile(r"\b(podnios|zebral|zlootowal|lootowal|zgarn|wpadlo|mi wypadlo|wypadlo mi|moj|ostatni)")
 
@@ -3319,6 +3506,15 @@ class Topic:
     name: str
     quest_id: int = 0
     advice: Optional[Advice] = None
+    at: float = field(default_factory=time.time)
+
+
+@dataclass
+class ShownList:
+    """The last list she read out, so "drugi", "nr 3", "ten z Loch Modan" name its rows."""
+
+    kind: str  # quest | item | place
+    items: list[tuple[int, str, str]]  # id, label, hint (zone/giver/place)
     at: float = field(default_factory=time.time)
 
 
