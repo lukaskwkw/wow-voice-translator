@@ -71,7 +71,8 @@ from .chat_insert import build_chat_line
 from .config import resolve_path
 from .directives import DIRECTIVES, is_real_question, split as split_directives
 from .jev import JevDecision, jev_router
-from .kb.world import Player
+from .kb.gamedb import CATEGORY_PL, SLOT_PL, STAT_PL, TYPE_PL
+from .kb.world import Player, fold as world_fold
 from .lexicon import Correction, Lexicon
 from .loot import advise as loot_advise, best_armor, item_verdict, pickup_tip, SHIELD_CLASSES, WEAPONS
 from .planner import Plan, Step, make_plan, skip_sentence
@@ -398,6 +399,26 @@ _CHAIN_HEADER = "Łańcuchy z nagrodą na upgrade później:"
 _SOURCES_MAX_IL_OVER_LEVEL = 12
 # event/cosmetic clothing: no stats, and the item table has no slot
 _COSMETIC_RE = re.compile(r"\b(shirt|tabard|tuxedo|costume)\b", re.I)
+
+# Polish skill words -> the English spell/skill names in the optional gamedb (folded text; longer first).
+_SKILL_EN = (
+    (r"\b(dwureczn\w*|two handed|two-handed)\b", "Two-Handed Swords"),
+    (r"\b(miecz\w*|sword\w*)\b", "Swords"),
+    (r"\b(top\w*|topor\w*|siekier\w*|axe\w*)\b", "Axes"),
+    (r"\b(luk\w*|bow\w*)\b", "Bows"),
+    (r"\b(kusz\w*|crossbow\w*)\b", "Crossbows"),
+    (r"\b(sztylet\w*|dagger\w*)\b", "Daggers"),
+    (r"\b(kij\w*|kostur\w*|laska\w*|staff\w*)\b", "Staves"),
+    (r"\b(mlot\w*|obuch\w*|mace\w*)\b", "Maces"),
+    (r"\b(tarcz\w*|shield\w*)\b", "Shields"),
+    (r"\b(wloczni\w*|polearm\w*)\b", "Polearms"),
+    (r"\b(rzut\w*|rzuca\w*|rzucan\w*|throw\w*)\b", "Thrown"),
+    (r"\b(bron\w*|walka wrecz|unarmed)\b", "Unarmed"),
+)
+# Words that frame the trainer question and are not a spell name when we try the question itself.
+_SKILL_NOISE = {"gdzie", "skad", "kogo", "sie", "naucze", "nauczyc", "uczy", "uczyc", "szkole", "szkolic",
+                "umiejetnosci", "umiejetnosc", "trener", "trenera", "trenerzy", "mistrz", "mistrza", "bron",
+                "broni", "walka", "wrecz", "prosze", "iskra"}
 _FILLER = {"ej", "hej", "no", "prosze", "mi", "ty", "teraz", "szybko", "do", "party", "grupy", "grupa", "druzyny",
            "raidu", "rajdu", "go", "ja", "ta", "ten", "tego", "te", "pana", "pani", "gracza", "gracz", "postac",
            "postaci", "kolege", "kolezanke", "typa", "laske", "goscia", "wez", "daj", "przekaz", "oddaj", "zrob",
@@ -434,6 +455,8 @@ _RULES: tuple[tuple[str, str], ...] = (
                   r"|\bgdzie\b.*\bpo\b.*\b(lepsz\w*|now\w*|upgrade)\b"),
     ("npc_loot", r"\b(co|jakie|jaki)\b.*\b(dropi\w*|wypada\w*|loot\w*|drop\w*)\b.*\b(z|od)\b"
                  r"|\b(dropi\w*|loot\w*)\b.*\b(z|od)\b.*\b(boss\w*|mob\w*|npc)\b"),
+    ("recipe", r"\b(przepis\w*|recept\w*|plan\w*|schemat\w*|formu\w*|wykroj\w*)\b"
+               r"|\b(co|czego|jakie)\b.*\b(uzyw\w*|uzyc|ugotow\w*|ugotuje|wytworz\w*|zrobic|zrobie)\b.*\b(przepis\w*|recept\w*)\b"),
     ("item_about", rf"^(?!.*\b(quest\w*|kwest\w*|zadani\w*|gdzie|kupi\w*|kupic)\b)"
                    rf"(?:(?=.*\b{_ITEM_NOUN}\b).*\b{_ITEM_Q}\b|(?:a\s+)?co to (?:jest )?za\b)"),
     ("stats_reset", r"\b(zresetuj\w*|wyzeruj\w*|resetuj\w*|zeruj\w*)\b.*\b(statystyk\w*|licznik\w*|sesj\w*)\b"),
@@ -449,6 +472,10 @@ _RULES: tuple[tuple[str, str], ...] = (
                  r"\b(znacznik\w*|pinezk\w*|punkt\w*|waypoint\w*|marker\w*)\b|\bzaznacz\w*\b"
                  r"|\b(pokaz\w*|wskaz\w*)\b.*\bna mapie\b|\b(zaprowadz|doprowadz|nawiguj|poprowadz)\w*\b"
                  r"|\bprowadz\w* (mnie )?do\b"),
+    ("spell_trainer", r"\b(gdzie|skad|u kogo)\b"
+                      r"(?!.*\b(gotow\w*|kucharz\w*|alchemi\w*|kowal\w*|krawie\w*|skor\w*|inzyni\w*|zielar\w*"
+                      r"|gorni\w*|rybo\w*|warz\w*)\b).*?\b(naucz\w*|uczy\w*|szkol\w*)\b"
+                      r"|\b(gdzie|skad)\b.*\b(umiejętn\w*|umiejetn\w*|trener\w*)\b.*\b(broni|rzut\w*|luk\w*|miecz\w*|tarcz\w*)\b"),
     ("find", r"\b(gdzie|najblizsz\w*|najblizej|szukam|szukac|znajde)\b.*\b(trener\w*|karczm\w*|gospod\w*|bank\w*|aukcj\w*"
              r"|stajn\w*|napraw\w*|gryf\w*|wiwern\w*|hipogryf\w*|mistrz\w* lot\w*|flight\w*|duch\w* uzdrowic\w*|wejsci\w*"
              r"|wejsc\w*)\b"
@@ -1468,6 +1495,10 @@ class Assistant:
             if self.cfg.get("assistant.item_help", True):
                 return self._item_compare(polish)
             return "Rozszerzona pomoc o przedmiotach jest wyłączona w Ustawieniach.", ""
+        if k == "recipe":
+            return self._recipe(polish), ""
+        if k == "spell_trainer":
+            return self._spell_trainer(polish), ""
         if k == "bag_list":
             return self._bag_list(), ""
         if k == "bag_junk":
@@ -3266,8 +3297,88 @@ class Assistant:
                          9: "przepis", 12: "przedmiot questowy"}
     _ITEM_QUALITY_LABEL = {0: "szary", 1: "biały", 2: "zielony", 3: "niebieski", 4: "fioletowy", 5: "legendarny"}
 
+    def _item_id_of(self, world, name: str) -> int:
+        """The item id a name resolves to in the world index, 0 when unknown (the exact folded name first)."""
+        if world is None:
+            return 0
+        key = world_fold(name or "")
+        for attr in ("_item_names", "_all_item_names"):
+            ids = (getattr(world, attr, None) or {}).get(key) or []
+            if ids:
+                return int(ids[0])
+        if not hasattr(world, "find_item_in"):
+            return 0
+        try:
+            ids = world.find_item_in(name or "")
+        except Exception:
+            return 0
+        return int(ids[0]) if ids else 0
+
+    def _gamedb_item(self, world, name: str) -> tuple[int, Optional[dict]]:
+        """(item id, gamedb record) for a name; (0, None) without the optional gamedb or for an unknown item."""
+        if world is None or not hasattr(world, "item_extra") or not hasattr(world, "find_item_in"):
+            return 0, None
+        item_id = self._item_id_of(world, name)
+        if not item_id:
+            return 0, None
+        try:
+            extra = world.item_extra(item_id)
+        except Exception:
+            extra = None
+        return item_id, extra if isinstance(extra, dict) else None
+
+    @staticmethod
+    def _item_name_of(world, item_id: int) -> str:
+        """An item name by id: QuestieDB first, then the optional gamedb, then "item N"."""
+        if world is not None and item_id:
+            rec = (getattr(world, "all_items", None) or {}).get(int(item_id))
+            if isinstance(rec, dict) and rec.get("n"):
+                return rec["n"]
+            if hasattr(world, "item_extra"):
+                try:
+                    extra = world.item_extra(int(item_id))
+                except Exception:
+                    extra = None
+                if isinstance(extra, dict) and extra.get("name"):
+                    return extra["name"]
+        return f"item {item_id}"
+
+    def _recipe_facts(self, world, item_id: int) -> list[str]:
+        """The recipe a recipe item teaches: product, profession and skill, reagents."""
+        try:
+            rec = world.recipe_of(item_id) if world is not None and hasattr(world, "recipe_of") else None
+        except Exception:
+            rec = None
+        if not isinstance(rec, dict):
+            return []
+        product = rec.get("product") or self._item_name_of(world, int(rec.get("creates") or 0))
+        profession = rec.get("profession") or ""
+        skill = rec.get("skill") or 0
+        suffix = " ".join(x for x in (profession, str(int(skill)) if skill else "") if x)
+        line = f"Przepis: {product}" + (f", {suffix}" if suffix else "") + "."
+        reagents = [f"{int(r[1])}× {self._item_name_of(world, int(r[0]))}"
+                    for r in (rec.get("reagents") or []) if r and len(r) > 1 and int(r[0])]
+        if reagents:
+            line += " Składniki: " + ", ".join(reagents) + "."
+        return [line]
+
+    def _used_in_recipes_facts(self, world, item_id: int) -> list[str]:
+        """The products of up to four recipes that consume the item as a reagent."""
+        try:
+            recs = world.recipes_using(item_id) if world is not None and hasattr(world, "recipes_using") else []
+        except Exception:
+            recs = []
+        names: list[str] = []
+        for rec in recs or []:
+            name = rec.get("product") or self._item_name_of(world, int(rec.get("creates") or 0))
+            if name and name not in names:
+                names.append(name)
+            if len(names) >= 4:
+                break
+        return ["Używany w przepisach: " + polish_list(names) + "."] if names else []
+
     def _item_facts(self, name: str, own: Optional["OwnItem"] = None) -> str:
-        """The item's facts as lines: kind, levels, your copy, vendors, drops, quests. No LLM, no prices."""
+        """The item's facts as lines: kind, levels, your copy, vendors, drops, quests, gamedb extras. No LLM."""
         world = self.world_getter()
         record = None
         if world is not None and hasattr(world, "item_record"):
@@ -3284,9 +3395,10 @@ class Assistant:
         shown = (record.get("n") if record else "") or name
         p = self._player()
         cls = record.get("c") if record else (own.class_id if own is not None else None)
+        item_id, extra = self._gamedb_item(world, shown)
         lines = [shown]
         label = self._ITEM_CLASS_LABEL.get(cls, f"klasa {cls}") if isinstance(cls, int) else ""
-        if label:
+        if label and extra is None:
             lines.append(f"Rodzaj: {label}.")
         level = record.get("il") if record else (own.loot.item_level if own is not None and own.loot else None)
         if isinstance(level, int) and level > 0:
@@ -3299,7 +3411,7 @@ class Assistant:
             lines.append(f"Jakość: {quality}. Masz: {own.count}.")
             price = getattr(own.bag, "sell_price", 0) if own.bag is not None else 0
             if (price or 0) > 0:
-                lines.append(f"U sprzedawcy: {_coins(price)}.")
+                lines.append(f"Sprzedasz za: {_coins(price)}.")
         if record:
             vendors = record.get("v") or []
             if vendors:
@@ -3312,7 +3424,45 @@ class Assistant:
                 lines.append("Questy: " + polish_list(list(dict.fromkeys(quests))[:5]) + ".")
         if own is not None and own.loot is not None:
             lines.append(item_verdict(own.loot, p.class_id, p.level))
-        lines.append("Brak danych o recepturach i reagentach.")
+        if extra is not None:  # optional gamedb: only the fields the file actually has
+            category = extra.get("category") or ""
+            type_ = extra.get("type") or ""
+            category = CATEGORY_PL.get(category, category)
+            type_ = TYPE_PL.get(type_, type_)
+            slot_raw = extra.get("slot") or ""
+            slot = SLOT_PL.get(slot_raw, slot_raw)
+            kind = f"{category} ({type_})" if category and type_ else (category or type_ or label)
+            if kind:
+                lines.append(f"Rodzaj: {kind}" + (f", {slot}" if slot else "") + ".")
+            if extra.get("armor"):
+                lines.append(f"Pancerz: {int(extra['armor'])}.")
+            if extra.get("block_value"):
+                lines.append(f"Blok: {int(extra['block_value'])}.")
+            mind, maxd, speed = extra.get("mindmg"), extra.get("maxdmg"), extra.get("speed") or 0
+            if mind and maxd and speed:
+                speed_s = speed / 1000.0
+                dps = ((mind + maxd) / 2.0) / speed_s if speed_s else 0
+                lines.append(f"Obrażenia: {int(mind)}-{int(maxd)} ({speed_s:.2f} s"
+                             + (f", {dps:.1f} dps" if dps > 0 else "") + ").")
+            stat_rows = [(k, extra[k]) for k in STAT_PL
+                         if isinstance(extra.get(k), (int, float)) and not isinstance(extra.get(k), bool) and extra.get(k)]
+            stat_rows.sort(key=lambda kv: -kv[1])  # the biggest bonus first, as on the item tooltip
+            stats = [f"+{int(value)} {STAT_PL[k]}" for k, value in stat_rows]
+            if stats:
+                lines.append("Statystyki: " + ", ".join(stats) + ".")
+            own_sell_shown = own is not None and own.bag is not None and \
+                (getattr(own.bag, "sell_price", 0) or 0) > 0
+            prices = []
+            if extra.get("sell") and not own_sell_shown:
+                prices.append(f"Sprzedasz za: {_coins(extra['sell'])}")
+            if extra.get("buy"):
+                prices.append(f"kupisz za: {_coins(extra['buy'])}")
+            if prices:
+                lines.append("; ".join(prices) + ".")
+            lines += self._recipe_facts(world, item_id)
+            lines += self._used_in_recipes_facts(world, item_id)
+        if not getattr(world, "gamedb", None):  # without the optional file we really know nothing about recipes
+            lines.append("Brak danych o recepturach i reagentach.")
         lines.append("Brak danych o cenach rynkowych.")
         self._sources = [f"item facts: {shown}"]
         self._set_topic("item", shown)
@@ -3345,7 +3495,7 @@ class Assistant:
             answer = item_verdict(o.loot, p.class_id, p.level) if o.loot is not None else self._item_plain(o)
             price = getattr(o.bag, "sell_price", 0) if o.bag is not None else 0
             if (price or 0) > 0:
-                answer += f" U sprzedawcy: {_coins(price)}."
+                answer += f" Sprzedasz za: {_coins(price)}."
             same = (o.class_id, o.subclass_id, o.equip_loc)  # "masz też" only for items of the same kind
             others = [c.name for c in cands[1:]
                       if c.name != o.name and (c.class_id, c.subclass_id, c.equip_loc) == same][:2]
@@ -3366,6 +3516,218 @@ class Assistant:
         name = names[0]
         own = next((o for o in self._own_items() if fold(o.name) == fold(name)), None)
         return self._item_facts(name, own)
+
+    @staticmethod
+    def _skill_english(folded: str) -> tuple[str, str]:
+        """(English gamedb skill name, the Polish word that named it) or ("", "")."""
+        for rx, english in _SKILL_EN:
+            match = re.search(rx, folded)
+            if match:
+                return english, match.group(0)
+        return "", ""
+
+    def _recipe_resolve(self, world, polish: str) -> tuple[int, str]:
+        """(item id, name) the recipe question names; the longest exact folded name first, then the item index."""
+        if world is None:
+            return 0, ""
+        names = getattr(world, "_all_item_names", None) or {}
+        if names:  # the optional gamedb's items are not all in QuestieDB, so search its index too
+            words = re.findall(r"[a-z0-9']+", world_fold(polish))
+            for size in range(min(6, len(words)), 0, -1):
+                grams = [" ".join(words[i:i + size]) for i in range(len(words) - size + 1)]
+                grams = [g for g in grams if g in names and (size > 1 or len(g) >= 5)]
+                if grams:
+                    item_id = int(names[max(grams, key=len)][0])
+                    return item_id, self._item_name_of(world, item_id)
+        if hasattr(world, "find_item_in"):
+            try:
+                ids = world.find_item_in(polish)
+            except Exception:
+                ids = []
+            if ids:
+                item_id = int(ids[0])
+                return item_id, self._item_name_of(world, item_id)
+        for cand in self._item_names_in(polish, include_topic=False):
+            item_id = self._item_id_of(world, cand)
+            if item_id:
+                return item_id, self._item_name_of(world, item_id)
+        return 0, ""
+
+    def _recipe(self, polish: str) -> str:
+        """A recipe item (what it teaches, its reagents, who sells it) or an item's recipes. No LLM."""
+        world = self.world_getter()
+        folded = fold(polish)
+        item_id, name = self._recipe_resolve(world, polish)
+        if not item_id or not name:
+            return "Podaj nazwę przedmiotu albo przepisu, np. „skąd przepis na Smoked Bear Meat?”."
+        record = None
+        if hasattr(world, "item_record"):
+            try:
+                record = world.item_record(name)
+            except Exception:
+                record = None
+        if not isinstance(record, dict):
+            record = None
+        rec = None
+        if hasattr(world, "recipe_of"):
+            try:
+                rec = world.recipe_of(item_id)
+            except Exception:
+                rec = None
+        recipe_word = bool(re.search(r"\b(przepis\w*|recept\w*)\b", folded))
+        if rec is None and recipe_word and (record is None or record.get("c") != 9):
+            # "skąd przepis na X?" names the product; the gamedb item "Recipe: X" is the recipe itself
+            rid = self._item_id_of(world, f"Recipe: {name}")
+            if rid and rid != item_id:
+                try:
+                    rec = world.recipe_of(rid)
+                except Exception:
+                    rec = None
+                if rec is not None or self._recipe_is_item(world, rid):
+                    item_id, name = rid, self._item_name_of(world, rid)
+                    record = None
+                    if hasattr(world, "item_record"):
+                        try:
+                            record = world.item_record(name)
+                        except Exception:
+                            record = None
+                    if not isinstance(record, dict):
+                        record = None
+        if rec is not None or (record is not None and record.get("c") == 9):
+            rec = rec if isinstance(rec, dict) else {}
+            profession = rec.get("profession") or ""
+            skill = rec.get("skill") or 0
+            suffix = " ".join(x for x in (profession, str(int(skill)) if skill else "") if x)
+            lines = [f"{name}" + (f" ({suffix})." if suffix else ".")]
+            if rec:
+                product = rec.get("product") or self._item_name_of(world, int(rec.get("creates") or 0))
+                if product:
+                    lines.append(f"Uczy: {product}.")
+                reagents = [f"{int(r[1])}× {self._item_name_of(world, int(r[0]))}"
+                            for r in (rec.get("reagents") or []) if r and len(r) > 1 and int(r[0])]
+                if reagents:
+                    lines.append("Składniki: " + ", ".join(reagents) + ".")
+            else:
+                lines.append("Nie mam danych, czego ten przepis uczy.")
+            if record:
+                vendors = record.get("v") or []
+                if vendors:
+                    lines.append("Sprzedają: " + polish_list(list(vendors)[:4]) + ".")
+                drops = list(record.get("nd") or []) + list(record.get("od") or [])
+                if drops:
+                    lines.append("Dropi: " + polish_list(drops[:4]) + ".")
+            self._sources = [f"recipe: {name}"]
+            self._set_topic("item", name)
+            return "\n".join(lines)
+        if not getattr(world, "gamedb", None):
+            return "Brak bazy gry – zbuduj ją: python -m wvt.kb.gamedb --download."
+        try:
+            recipes = world.recipes_using(item_id) if hasattr(world, "recipes_using") else []
+        except Exception:
+            recipes = []
+        if not recipes:
+            return f"Nie znam przepisu, który używa {name}."
+        level = (record.get("il") if record else 0) or 0
+        lines = [f"{name} (poz. {int(level)}): używany w przepisach:"]
+        for rec in list(recipes)[:6]:
+            product = rec.get("product") or self._item_name_of(world, int(rec.get("creates") or 0))
+            profession = rec.get("profession") or ""
+            skill = rec.get("skill") or 0
+            suffix = " ".join(x for x in (profession, str(int(skill)) if skill else "") if x)
+            head = f"- {product}" + (f" ({suffix})" if suffix else "")
+            detail = ""
+            recipe_id = int(rec.get("recipe_item") or 0)
+            if recipe_id:
+                recipe_name = self._item_name_of(world, recipe_id)
+                if not recipe_name.startswith("item "):
+                    detail = f"przepis {recipe_name}"
+                    rrecord = None
+                    if hasattr(world, "item_record"):
+                        try:
+                            rrecord = world.item_record(recipe_name)
+                        except Exception:
+                            rrecord = None
+                    if isinstance(rrecord, dict):
+                        vendors = list(rrecord.get("v") or [])
+                        drops = list(rrecord.get("nd") or []) + list(rrecord.get("od") or [])
+                        if vendors:
+                            detail += f"; sprzedają: {polish_list(vendors[:2])}"
+                        elif drops:
+                            detail += f"; dropi z: {polish_list(drops[:2])}"
+            lines.append(head + (f": {detail}" if detail else "") + ".")
+        self._sources = [f"recipe: {name}"]
+        self._set_topic("item", name)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _recipe_is_item(world, item_id: int) -> bool:
+        """Whether QuestieDB calls the item a recipe (class 9), even without the optional gamedb."""
+        if world is None or not hasattr(world, "item_record"):
+            return False
+        try:
+            rec = world.item_record(Assistant._item_name_of(world, item_id))
+        except Exception:
+            return False
+        return isinstance(rec, dict) and rec.get("c") == 9
+
+    def _spell_trainer(self, polish: str) -> tuple[str, str]:
+        """Who teaches a weapon skill (Thrown, Swords...), nearest first. No LLM."""
+        world = self.world_getter()
+        folded = fold(polish)
+        english, word = self._skill_english(folded)
+        has_db = world is not None and bool(getattr(world, "gamedb", None)) and hasattr(world, "spell_by_name")
+        spell = None
+        if has_db:
+            queries = [english] if english else []
+            queries += [w for w in folded.split() if len(w) > 2 and w not in _SKILL_NOISE]
+            for query in queries:
+                try:
+                    spell = world.spell_by_name(query)
+                except Exception:
+                    spell = None
+                if spell:
+                    break
+        if spell is None:
+            if not has_db:  # the old weapon-master answer still works without the optional gamedb
+                text, line = self._lookup(polish)
+                return text + " Brak bazy gry – nie mam listy umiejętności trenerów.", line
+            shown = word or next((w for w in folded.split() if len(w) > 2 and w not in _SKILL_NOISE), "") or english or "tej umiejętności"
+            return f"Nie znam umiejętności „{shown}”. Spróbuj np. rzucanie, łuki, tarcze.", ""
+        spell_id = int(spell.get("id") or 0)
+        spell_name = spell.get("name") or english or word
+        try:
+            ids = world.trainers_of(spell_id)
+        except Exception:
+            ids = []
+        player = self._player()
+        pos = getattr(self.quests, "pos", None)
+        rows = []
+        for npc_id in ids:
+            npc = (getattr(world, "npcs", None) or {}).get(int(npc_id)) or {}
+            faction = npc.get("f") or ""
+            if player.faction and faction and player.faction not in faction:
+                continue
+            name = npc.get("n") or f"NPC {npc_id}"
+            try:
+                zone = world.names.get(int(npc.get("z") or 0), "")
+            except Exception:
+                zone = ""
+            try:
+                spot = world.nearest("npc", int(npc_id), pos)
+            except Exception:
+                spot = None
+            distance = spot.distance if spot is not None else None
+            rows.append((distance if distance is not None else 1e12, name, zone, distance))
+        rows.sort(key=lambda row: row[0])
+        if not rows:
+            return f"{spell_name}: nie mam trenerów tej umiejętności w bazie.", ""
+        lines = [f"{spell_name}: uczy"]
+        for _key, name, zone, distance in rows[:4]:
+            line = f"- {name}" + (f", {zone}" if zone else "")
+            line += f", ~{int(round(distance))} yd" if distance is not None else ", (inna mapa)"
+            lines.append(line)
+        self._sources = [f"trainers: {spell_id}"]
+        return "\n".join(lines), ""
 
     def _item_plain(self, o: "OwnItem") -> str:
         """An item without stats: what it is for."""
@@ -3432,7 +3794,7 @@ class Assistant:
                 f"{polish_list([self._count_text(i) for i in junk[:5]])}.{more}")
         copper = sum((it.sell_price or 0) * it.count for it in junk if (it.sell_price or 0) > 0)
         if copper > 0:
-            text += f" Razem u sprzedawcy około {_coins(copper)}."
+            text += f" Razem sprzedasz za około {_coins(copper)}."
         return text
 
     def _bag_count(self, text: str, quiet: bool = False) -> str:

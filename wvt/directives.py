@@ -41,6 +41,8 @@ DIRECTIVES: dict[str, str] = {
     "dungeon_level": "jaki loch na twój poziom",
     "item_about": "informacje o przedmiocie",
     "item_compare": "porównanie dwóch przedmiotów (bez cen rynkowych)",
+    "recipe": "przepis: co robi, czego używa, gdzie go kupić",
+    "spell_trainer": "gdzie nauczę się umiejętności (np. Thrown)",
 }
 
 _TOKEN = re.compile(r"\{([^{}]*)\}")

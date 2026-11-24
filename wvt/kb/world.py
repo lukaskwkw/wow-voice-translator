@@ -419,7 +419,7 @@ class Player:
 
 
 class World:
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, gamedb: Optional[dict] = None):
         self.data = data
         self.quests: dict[int, dict] = {int(k): v for k, v in data.get("quests", {}).items()}
         self.npcs: dict[int, dict] = {int(k): v for k, v in data.get("npcs", {}).items()}
@@ -457,11 +457,37 @@ class World:
                 ids = self._npc_names.get(fold(name))
                 if ids:
                     self._loot_by_npc[ids[0]].append(iid)
+        # optional game database (python -m wvt.kb.gamedb): empty when the file is absent
+        self.gamedb: dict = gamedb or {}
+        self._items_extra: dict[int, dict] = {int(k): v for k, v in self.gamedb.get("items", {}).items()}
+        self._spells: dict[int, dict] = {int(k): v for k, v in self.gamedb.get("spells", {}).items()}
+        self._recipes: dict[int, dict] = {int(k): v for k, v in self.gamedb.get("recipes", {}).items()}
+        self._recipes_by_reagent: dict[int, list[int]] = defaultdict(list)
+        self._recipes_by_item: dict[int, dict] = {}
+        for sid, rec in self._recipes.items():
+            for reagent in rec.get("reagents") or []:
+                if reagent:
+                    self._recipes_by_reagent[int(reagent[0])].append(sid)
+            if rec.get("recipe_item"):
+                self._recipes_by_item[int(rec["recipe_item"])] = rec
+        self._trainers: dict[int, list] = {int(k): v for k, v in self.gamedb.get("trainers", {}).items()}
+        self._spell_names: dict[int, str] = {int(k): v for k, v in self.gamedb.get("spell_names", {}).items()}
+        self._spell_trainers: dict[int, list[int]] = defaultdict(list)
+        for npc_id, rows in self._trainers.items():
+            for row in rows:
+                if row:
+                    self._spell_trainers[int(row[0])].append(npc_id)
 
     @classmethod
     def load(cls, path: Path) -> "World":
         with gzip.open(path, "rt", encoding="utf-8") as fh:
-            return cls(json.load(fh))
+            data = json.load(fh)
+        gamedb_path = path.with_name("gamedb.json.gz")
+        gamedb = None
+        if gamedb_path.exists():
+            with gzip.open(gamedb_path, "rt", encoding="utf-8") as fh:
+                gamedb = json.load(fh)
+        return cls(data, gamedb)
 
     # ---- names and maps
     def map_of(self, area: int) -> int:
@@ -628,6 +654,57 @@ class World:
             friendly = [n for n in hits if faction in self.npcs[n].get("f", faction)]
             hits = friendly or hits
         return hits
+
+    # ---- optional game database (items, spells, recipes, trainers); all empty without the file
+    def item_extra(self, item_id: int) -> Optional[dict]:
+        """The gamedb item record (stats, prices, source) or None."""
+        return self._items_extra.get(int(item_id))
+
+    def recipe_of(self, item_id: int) -> Optional[dict]:
+        """The recipe taught by that recipe item (``recipe_item``), or None when unknown."""
+        return self._recipes_by_item.get(int(item_id))
+
+    def recipes_using(self, item_id: int) -> list[dict]:
+        """Every recipe that consumes the item as a reagent."""
+        return [self._recipes[sid] for sid in self._recipes_by_reagent.get(int(item_id), ()) if sid in self._recipes]
+
+    def spell_by_name(self, query: str) -> Optional[dict]:
+        """A spell by its exact folded name, then a unique match of all its words against name and skill."""
+        if not self._spells:
+            return None
+        key = fold(query or "").strip(" ?!.")
+        if not key:
+            return None
+        exact = [sid for sid, sp in self._spells.items() if fold(sp.get("name", "")) == key]
+        if exact:
+            return self._spells[min(exact)]
+        words = [w for w in re.findall(r"[\w']+", key) if len(w) > 2]
+        if not words:
+            return None
+        hits: list[int] = []
+        for sid, sp in self._spells.items():  # stops at the second hit: only a unique match counts
+            hay = fold(sp.get("name", "")) + " " + fold(sp.get("skill", ""))
+            if all(w in hay for w in words):
+                hits.append(sid)
+                if len(hits) > 1:
+                    return None
+        return self._spells[hits[0]] if hits else None
+
+    def trainers_of(self, spell_id: int) -> list[int]:
+        """NPC ids whose trainer list contains the spell."""
+        return sorted(set(self._spell_trainers.get(int(spell_id), ())))
+
+    def spells_of(self, npc_id: int) -> list[dict]:
+        """The trainer's spells with name, cost, required level and required skill."""
+        out: list[dict] = []
+        for row in self._trainers.get(int(npc_id), ()):
+            spell = int(row[0])
+            sp = self._spells.get(spell, {})
+            out.append({"id": spell, "name": sp.get("name") or self._spell_names.get(spell, ""),
+                        "cost": int(row[1]) if len(row) > 1 else 0,
+                        "reqlevel": int(row[4]) if len(row) > 4 else 0,
+                        "reqskill": int(row[2]) if len(row) > 2 else 0})
+        return out
 
     def find_item_in(self, text: str) -> list[int]:
         """Ids of the item named somewhere in ``text`` ("gdzie kupię Rhapsody Malt?"): the longest exact

@@ -177,7 +177,7 @@ def test_difficulty_routes_before_the_broader_quest_rules():
 
 def test_trainer_phrasing_finds_cooks_and_weapon_masters():
     assert parse_intent("gdzie nauczę się gotować").kind == "find"
-    assert parse_intent("gdzie nauczę się rzucać").kind == "find"
+    assert parse_intent("gdzie nauczę się rzucać").kind == "spell_trainer"  # the optional gamedb knows the trainers
     me = Player(level=10, class_id=1, faction="A")
     assert _service("gdzie naucze sie gotowac", me)[:2] == ("TRAINER", "Cook")
     assert _service("gdzie naucze sie rzucac", me)[:2] == ("TRAINER", "Weapon Master")

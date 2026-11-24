@@ -41,17 +41,17 @@ def test_bag_junk_totals_the_prices_of_the_junk():
                       "111\t3\t0\t7\t5\t0\tSzmaty\t33",
                       "112\t1\t0\t0\t0\t0\tButelka\t150")
     text = a._bag_junk()
-    assert "Razem u sprzedawcy około 2 s 49 c." in text
+    assert "Razem sprzedasz za około 2 s 49 c." in text
 
 
 def test_bag_junk_without_prices_says_nothing_about_money():
     a = bag_assistant("111\t3\t0\t7\t5\t0\tSzmaty")
     text = a._bag_junk()
-    assert "Razem u sprzedawcy" not in text
+    assert "Razem sprzedasz za" not in text
 
 
 def test_item_facts_show_the_vendor_price_of_a_bag_item():
     a = bag_assistant("111\t3\t0\t7\t5\t0\tSzmaty\t33")
     own = next(o for o in a._own_items() if o.name == "Szmaty")
     facts = a._item_facts("Szmaty", own)
-    assert "U sprzedawcy: 33 c." in facts
+    assert "Sprzedasz za: 33 c." in facts
